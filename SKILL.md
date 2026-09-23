@@ -36,7 +36,7 @@ python3 -m pip install -r requirements.txt
 
 | Path | What |
 |---|---|
-| `modules/` | BI source parsing. Six adapters; `modules/cognos/` is the proven one. |
+| `modules/` | BI source parsing. Six adapters, one per BI tool. |
 | `assets/react_ui/` | Locked React component library -- `theme.ts`, `charts.tsx`, 14 exports. |
 | `assets/streamlit_ui/` | Locked Streamlit component library -- palette, KPI card, ten chart shapes. |
 | `pipeline/` | The Snowflake build: phase graph in `build.py`, 20 DDL files in `sql/`. |
@@ -52,16 +52,6 @@ over the same model produce the same look, and it is the whole reason a generate
 can match one built by hand.
 
 Composition choices are governed by `references/composition-rules.md`, not by taste.
-
-## Adapter status
-
-| Adapter | Status |
-|---|---|
-| Cognos Framework Manager | Proven end to end. 41 tests. |
-| Tableau, Power BI, Looker, Denodo, SAP BusinessObjects | Present and tested at the parse layer, not yet rehearsed through the full build. |
-
-Say so if a user picks one of the five. They parse; the downstream build has not been
-exercised against them.
 
 ## Workflow
 

@@ -58,15 +58,6 @@ libraries still expose every shape, that the composition rules cite only compone
 exist, that the reference fingerprints self-compare at 100%, and that teardown refuses to act
 without `--execute`. Both library checks are verified by negative control.
 
-## Adapter status
-
-| Adapter | Status |
-|---|---|
-| IBM Cognos Framework Manager | Proven end to end. 41 tests. |
-| Tableau, Power BI, Looker, Denodo, SAP BusinessObjects | Parse and are tested at that layer; the downstream build has not been rehearsed against them. |
-
-Say so rather than implying parity.
-
 ## Naming
 
 Every object name this pipeline creates comes from `pipeline/config.py`. Nothing is

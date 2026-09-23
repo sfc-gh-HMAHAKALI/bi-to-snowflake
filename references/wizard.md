@@ -14,7 +14,7 @@ ask_user_question:
     question: "What kind of BI source are we starting from?"
     options:
       - label: "IBM Cognos Framework Manager"
-        description: "A model.xml or .cpf export. The proven path."
+        description: "A model.xml or .cpf export."
       - label: "Tableau"
         description: "twb, twbx, tds or tdsx."
       - label: "Power BI"
@@ -30,9 +30,6 @@ ask_user_question:
     type: text
     defaultValue: "<best guess from the working directory, or ~/Downloads>"
 ```
-
-If the user picks anything other than Cognos, say plainly that it parses but the downstream
-build has not been rehearsed against it. Do not imply parity.
 
 Glob for the likely file first and offer what you find as the default. Asking for a path the
 user has to go and look up is worse than a wrong guess they can correct.
