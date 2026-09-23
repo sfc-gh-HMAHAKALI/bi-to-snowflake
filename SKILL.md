@@ -40,7 +40,7 @@ python3 -m pip install -r requirements.txt
 | `assets/react_ui/` | Locked React component library -- `theme.ts`, `charts.tsx`, 14 exports. |
 | `assets/streamlit_ui/` | Locked Streamlit component library -- palette, KPI card, ten chart shapes. |
 | `pipeline/` | The Snowflake build: phase graph in `build.py`, 20 DDL files in `sql/`. |
-| `references/` | Composition rules, per-adapter notes. |
+| `references/` | Composition rules, per-adapter notes, example prompts. |
 
 ## The one rule that matters
 
@@ -57,3 +57,7 @@ Composition choices are governed by `references/composition-rules.md`, not by ta
 
 The guided wizard, the output selector and the phase graph are documented in
 `references/wizard.md`. Load it before starting a run.
+
+When a run finishes, offer a few prompts from `references/example-prompts.md`.
+A user handed a new agent with no idea what to ask it concludes it does not
+work.

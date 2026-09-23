@@ -168,6 +168,13 @@ python3 pipeline/verify_deployment.py --connection <name>
 Read `references/composition-rules.md` before generating any page. The libraries in
 `assets/` are fixed; pages compose against them and never restyle them.
 
+Then give the user something to ask. Pick a handful from
+`references/example-prompts.md` -- a couple of number questions, one definition
+question, and at least one of the two that the agent should decline to answer as
+asked, because a generated agent that fabricates a plausible number is worse than
+no agent and that is the fastest way to show it does not. Do not paste the whole
+file.
+
 ## Rehearsing more than once
 
 Idempotency makes a re-run safe, but it does not get you back to a clean account: an object
