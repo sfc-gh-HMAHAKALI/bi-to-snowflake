@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""Generate the physical layer from the Knowledge Base.
+
+The schema is not hand-written. It is emitted from ``KB_TERM`` -- every column,
+type and nullability comes from what the source BI model declared. That is the
+point: the KB is not documentation about the warehouse, it is enough information
+to *build* the warehouse contract the BI layer expects.
+
+Beyond reproducing the six core entities, this adds three tables that exist to
+make the reference model's harder requirements testable with real data rather than argued
+about in slides:
+
+  FACT_MONTHLY_FORECAST   monthly grain against daily sales -> E1 stitch, E2 determinants
+  FACT_WAREHOUSE_STOCK    daily balance snapshot            -> E6 semi-additive closing balance
+  DIM_CURRENCY_CONVERSION date-range keyed rates            -> E4 non-PK/FK range join
+  DIM_SUPPLIER            no shared dimension with sales    -> E3 cross-product refusal
+
+The date dimension is generated with genuine fiscal columns. the reference model's fiscal year
+runs July-June, so FINC_YR_ID for a July date is the following calendar year.
+Deriving that with a flat DATEADD(month, -6) offset -- as the earlier handoff did
+-- is wrong at every period boundary and only at the boundaries, which is the
+hardest kind of error to notice. The model's own DIM_TIME filter
+(FINC_YR_ID >= 2018) is evidence these columns exist and are authoritative.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from collections import defaultdict
+
+import config
+
+# Cognos connection alias -> physical schema, same mapping the KB loader uses.
+SCHEMAS = set(config.DEFAULT.source_schemas)
+
+# Columns whose declared role is a measure but which are really identifiers.
+# Kept as their natural NUMBER type in DDL; the point of the distinction is that
+# they must not become metrics, not that they change type.
+DATE_COLS = {"PROCESSED_DATE", "PERIOD_DATE", "DATA_LOAD_TIME", "DATA_UPDATE_TIME"}
+
+
+def run_sql(sql: str, connection: str, label: str) -> None:
+    with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False, encoding="utf-8") as fh:
+        fh.write(sql)
+        path = fh.name
+    try:
+        proc = subprocess.run(
+            ["snow", "sql", "-f", path, "-c", connection], capture_output=True, text=True
+        )
+        if proc.returncode != 0:
+            tail = (proc.stdout or "")[-4000:] + (proc.stderr or "")[-4000:]
+            raise RuntimeError(f"{label} failed:\n{tail}")
+        print(f"  {label}: ok")
+    finally:
+        os.unlink(path)
+
+
+def ddl_from_kb(columns: list[dict], database: str) -> str:
+    """Emit CREATE TABLE for each core entity using the KB-declared columns."""
+    by_entity: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
+    for r in columns:
+        key = (r["PHYSICAL_SCHEMA"], r["PHYSICAL_OBJECT"], r["ENTITY_NAME"])
+        by_entity[key].append(r)
+
+    out = [f"USE DATABASE {database};", ""]
+    for schema in sorted(SCHEMAS):
+        out.append(f"CREATE SCHEMA IF NOT EXISTS {schema};")
+    out.append("")
+
+    for (schema, obj, entity), cols in sorted(by_entity.items()):
+        seen: set[str] = set()
+        lines = []
+        for c in sorted(cols, key=lambda x: x["TERM_NAME"]):
+            name = c["PHYSICAL_COLUMN"]
+            if name in seen:
+                continue
+            seen.add(name)
+            dt = c["DATA_TYPE"] or "VARCHAR"
+            if dt == "NUMBER":
+                # Amounts need scale; identifiers do not. Splitting on the
+                # measure-quality verdict would be circular here, so use the
+                # name, which is reliable for this one decision.
+                dt = "NUMBER(38,2)" if any(
+                    k in name for k in ("AMOUNT", "AMT", "QUANTITY", "RATE", "PRICE")
+                ) else "NUMBER(38,0)"
+            lines.append(f"    {name:34} {dt}")
+        out.append(
+            f"-- {entity}: {len(lines)} columns, generated from KB_TERM\n"
+            f"CREATE OR REPLACE TABLE {schema}.{obj} (\n"
+            + ",\n".join(lines)
+            + f"\n)\nCOMMENT = 'Generated from KB_TERM for Cognos query subject {entity}';\n"
+        )
+    return "\n".join(out)
+
+
+def ddl_requirement_tables(database: str) -> str:
+    """Tables that exist so requirements E1-E6 can be demonstrated, not asserted."""
+    return f"""
+USE DATABASE {database};
+
+-- E1 (stitch) and E2 (determinants): monthly grain beside daily sales.
+-- A naive join of this to FACT_SALES_SUMMARY on month repeats the forecast once
+-- per selling day, which is the double count Cognos's determinants prevent.
+CREATE OR REPLACE TABLE SALES_ANALYTICS.FACT_MONTHLY_FORECAST (
+    FORECAST_MONTH_ID              NUMBER(38,0)  COMMENT 'YYYYMM. The determinant key: one row per month per product line per territory',
+    FORECAST_MONTH_START           DATE,
+    INVENTORY_ITEM_ID              NUMBER(38,0),
+    TERRITORY_LEVEL4               VARCHAR,
+    FORECAST_AMOUNT_USD            NUMBER(38,2)  COMMENT 'Monthly grain. Must be grouped to FORECAST_MONTH_ID before summing alongside daily facts',
+    FORECAST_QUANTITY              NUMBER(38,0)
+)
+COMMENT = 'Monthly forecast. Deliberately coarser grain than FACT_SALES_SUMMARY so multi-grain behaviour is testable.';
+
+-- E6 (semi-additive): a balance, not a flow. Summing this across dates is wrong;
+-- the closing balance is the last reading in the period.
+CREATE OR REPLACE TABLE SALES_ANALYTICS.FACT_WAREHOUSE_STOCK (
+    SNAPSHOT_DATE                  DATE          COMMENT 'Balance date. Rollup across this column is LAST, not SUM',
+    WAREHOUSE_CODE                 VARCHAR,
+    INVENTORY_ITEM_ID              NUMBER(38,0),
+    UNITS_ON_HAND                  NUMBER(38,0)  COMMENT 'Semi-additive: SUM across warehouses, LAST across time',
+    STOCK_VALUE_USD                NUMBER(38,2)  COMMENT 'Semi-additive: SUM across warehouses, LAST across time'
+)
+COMMENT = 'Daily stock balance snapshot. Exists to make the closing-balance requirement (E6) demonstrable.';
+
+-- E4 (non-PK/FK join): rate keyed by currency plus a validity date range, so the
+-- join is BETWEEN rather than equality. No foreign key exists or could.
+CREATE OR REPLACE TABLE COMMON_ANALYTICS.DIM_CURRENCY_CONVERSION (
+    FROM_CURRENCY_CODE             VARCHAR,
+    TO_CURRENCY_CODE               VARCHAR,
+    START_DATE                     DATE,
+    END_DATE                       DATE,
+    CONVERSION_RATE                NUMBER(38,8)
+)
+COMMENT = 'Currency rates with validity windows. Joined on code plus date BETWEEN start and end -- the E4 non-key join.';
+
+-- E3 (cross product): shares no dimension with the sales star. Any attempt to
+-- report supplier alongside sales has no join path, which is the case Cognos
+-- blocks with its cross-product governor.
+CREATE OR REPLACE TABLE COMMON_ANALYTICS.DIM_SUPPLIER (
+    SUPPLIER_ID                    NUMBER(38,0),
+    SUPPLIER_NAME                  VARCHAR,
+    SUPPLIER_COUNTRY               VARCHAR,
+    CONTRACT_TIER                  VARCHAR
+)
+COMMENT = 'Deliberately unrelated to the sales star: no shared key. Used to show the E3 cross-product case.';
+"""
+
+
+def data_date_dimension() -> str:
+    """Populate DIM_DATE with genuine fiscal columns.
+
+    Column names here are the *physical* names (``FISCAL_YEAR_ID``), not the
+    Cognos aliases (``FINC_YR_ID``). The KB holds both, and that translation is
+    precisely the mapping a semantic layer has to own: report authors type
+    FINC_YR_ID, the warehouse stores FISCAL_YEAR_ID.
+
+    the reference model's fiscal year runs July-June, so a July date belongs to the following
+    calendar year's fiscal year. That is applied as a shift of the year and month
+    *ordinals* only. The earlier handoff derived fiscal periods with a blanket
+    ``DATEADD('month', -6, ...)`` on the date itself, which moves every quarter
+    and month boundary as well and is therefore wrong at exactly the points
+    period-to-date metrics are evaluated. The source model's own filter
+    (``FINC_YR_ID >= 2018``) is evidence these columns already exist upstream and
+    are the authority, not something to recompute.
+    """
+    return """
+USE DATABASE {{DB}};
+
+TRUNCATE TABLE IF EXISTS COMMON_ANALYTICS.DIM_DATE;
+
+INSERT INTO COMMON_ANALYTICS.DIM_DATE (
+    DAY_DATE, DAY_NUMBER, DAY_WORK_NUMBER, BUSINESS_DAY_FLAG,
+    CALENDAR_MONTH_ID, CALENDAR_MONTH_NAME,
+    CALENDAR_QUARTER_ID, CALENDAR_QUARTER_NAME,
+    CALENDAR_YEAR_ID, CALENDAR_YEAR_NAME,
+    FISCAL_YEAR_ID, FISCAL_YEAR_NAME,
+    FISCAL_QUARTER_ID, FISCAL_QUARTER_NAME, FISCAL_QUARTER_YEAR,
+    FISCAL_MONTH_ID, FISCAL_MONTH_NAME,
+    MONTH_YEAR, WEEK_NUMBER_OF_YEAR, START_OF_WEEK,
+    START_WEEK_NAME, END_WEEK_NAME,
+    DATA_LOAD_TIME, DATA_UPDATE_TIME
+)
+WITH d AS (
+    SELECT DATEADD('day', SEQ4(), DATE '2018-01-01') AS dt
+    FROM TABLE(GENERATOR(ROWCOUNT => 3652))
+), f AS (
+    SELECT
+        dt,
+        -- Fiscal year starts 1 July: Jul-Dec rolls into the next fiscal year.
+        IFF(MONTH(dt) >= 7, YEAR(dt) + 1, YEAR(dt))       AS fy,
+        -- Fiscal month 1 = July. Shifting the ordinal, not the date.
+        IFF(MONTH(dt) >= 7, MONTH(dt) - 6, MONTH(dt) + 6)  AS fm
+    FROM d
+)
+SELECT
+    dt                                                         AS DAY_DATE,
+    DAYOFMONTH(dt)                                             AS DAY_NUMBER,
+    -- Working-day ordinal within the fiscal month, for business-day reporting.
+    SUM(IFF(DAYOFWEEK(dt) BETWEEN 1 AND 5, 1, 0))
+        OVER (PARTITION BY fy, fm ORDER BY dt)                 AS DAY_WORK_NUMBER,
+    IFF(DAYOFWEEK(dt) BETWEEN 1 AND 5, 1, 0)                   AS BUSINESS_DAY_FLAG,
+    YEAR(dt) * 100 + MONTH(dt)                                 AS CALENDAR_MONTH_ID,
+    MONTHNAME(dt)                                              AS CALENDAR_MONTH_NAME,
+    YEAR(dt) * 10 + QUARTER(dt)                                AS CALENDAR_QUARTER_ID,
+    'CY' || YEAR(dt) || ' Q' || QUARTER(dt)                     AS CALENDAR_QUARTER_NAME,
+    YEAR(dt)                                                   AS CALENDAR_YEAR_ID,
+    'CY' || YEAR(dt)                                           AS CALENDAR_YEAR_NAME,
+    fy                                                         AS FISCAL_YEAR_ID,
+    'FY' || fy                                                 AS FISCAL_YEAR_NAME,
+    fy * 10 + CEIL(fm / 3.0)                                   AS FISCAL_QUARTER_ID,
+    'Q' || CEIL(fm / 3.0)                                      AS FISCAL_QUARTER_NAME,
+    'FY' || fy || ' Q' || CEIL(fm / 3.0)                        AS FISCAL_QUARTER_YEAR,
+    fy * 100 + fm                                              AS FISCAL_MONTH_ID,
+    'FY' || fy || ' P' || LPAD(fm::VARCHAR, 2, '0')              AS FISCAL_MONTH_NAME,
+    MONTHNAME(dt) || '-' || YEAR(dt)                            AS MONTH_YEAR,
+    WEEKOFYEAR(dt)                                             AS WEEK_NUMBER_OF_YEAR,
+    DATE_TRUNC('week', dt)                                     AS START_OF_WEEK,
+    TO_CHAR(DATE_TRUNC('week', dt), 'DD-MON-YY')               AS START_WEEK_NAME,
+    TO_CHAR(DATEADD('day', 6, DATE_TRUNC('week', dt)), 'DD-MON-YY') AS END_WEEK_NAME,
+    CURRENT_DATE()                                             AS DATA_LOAD_TIME,
+    CURRENT_DATE()                                             AS DATA_UPDATE_TIME
+FROM f;
+"""
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="Generate the physical layer from the KB")
+    ap.add_argument("--columns", default="out/core_columns.json")
+    config.add_arguments(ap)
+    ap.add_argument("--connection", default="my-demo-account")
+    ap.add_argument("--out-dir", default="sql")
+    ap.add_argument("--execute", action="store_true", help="Run the generated SQL")
+    args = ap.parse_args(argv)
+
+    with open(args.columns, encoding="utf-8") as f:
+        columns = json.load(f)
+
+    core = ddl_from_kb(columns, args.database)
+    extra = ddl_requirement_tables(args.database)
+
+    header = (
+        f"-- Generated by generate_physical_layer.py from KB_TERM\n"
+        f"-- {len(columns)} column definitions across "
+        f"{len({(r['PHYSICAL_SCHEMA'], r['PHYSICAL_OBJECT']) for r in columns})} tables.\n"
+        f"-- Do not hand-edit: re-run the generator after reloading the KB.\n\n"
+        f"CREATE DATABASE IF NOT EXISTS {args.database}\n"
+        f"  COMMENT = 'Physical layer, schema generated from the semantic knowledge base';\n"
+    )
+
+    path = os.path.join(args.out_dir, "10_physical_layer.sql")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(header + core + extra)
+    print(f"wrote {path}")
+
+    date_path = os.path.join(args.out_dir, "11_date_dimension.sql")
+    with open(date_path, "w", encoding="utf-8") as f:
+        f.write(data_date_dimension())
+    print(f"wrote {date_path}")
+
+    if args.execute:
+        print("executing:")
+        run_sql(header + core + extra, args.connection, "physical layer DDL")
+        run_sql(data_date_dimension(), args.connection, "date dimension")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

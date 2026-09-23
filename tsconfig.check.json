@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "noEmit": true, "jsx": "react-jsx", "skipLibCheck": true,
+    "moduleResolution": "bundler", "module": "esnext", "target": "es2020",
+    "strict": true, "esModuleInterop": true,
+    "paths": { "@/lib/*": ["./assets/react_ui/*"] }
+  },
+  "include": ["assets/react_ui/charts.tsx", "assets/react_ui/theme.ts"]
+}

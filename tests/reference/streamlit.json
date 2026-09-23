@@ -1,0 +1,42 @@
+{
+  "kind": "streamlit",
+  "source": "app_streamlit/pages_impl.py",
+  "composition": {
+    "page_overview": {
+      "area_gap": 1,
+      "kpi_card": 4,
+      "ranked_bar": 2,
+      "waterfall": 1
+    },
+    "page_mix": {
+      "heatmap": 1,
+      "mix_bar": 2,
+      "treemap": 1
+    },
+    "page_territory": {
+      "grid": 1,
+      "ranked_bar": 1,
+      "sunburst": 1
+    },
+    "page_product": {
+      "grid": 1,
+      "ranked_bar": 2,
+      "treemap": 1
+    },
+    "page_customer": {
+      "grid": 1,
+      "pareto": 1,
+      "ranked_bar": 1
+    },
+    "page_fiscal": {
+      "kpi_card": 4
+    },
+    "page_ask": {},
+    "page_lineage": {}
+  },
+  "totals": {
+    "views": 8,
+    "components": 26,
+    "distinct": 10
+  }
+}

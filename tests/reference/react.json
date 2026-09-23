@@ -1,0 +1,40 @@
+{
+  "kind": "react",
+  "source": "app_react/components/report.tsx",
+  "composition": {
+    "Overview": {
+      "AreaGap": 1,
+      "Kpi": 4,
+      "RankedBar": 2,
+      "Waterfall": 1
+    },
+    "Mix & seasonality": {
+      "Heatmap": 1,
+      "MixBar": 2,
+      "Treemap": 1
+    },
+    "Territory": {
+      "RankedBar": 1,
+      "Sunburst": 1
+    },
+    "Product": {
+      "RankedBar": 1,
+      "Treemap": 1
+    },
+    "Customer": {
+      "Pareto": 1,
+      "RankedBar": 1
+    },
+    "Fiscal calendar": {},
+    "Provenance": {
+      "CompareBars": 1,
+      "Kpi": 4,
+      "Sparkline": 1
+    }
+  },
+  "totals": {
+    "views": 7,
+    "components": 24,
+    "distinct": 11
+  }
+}
