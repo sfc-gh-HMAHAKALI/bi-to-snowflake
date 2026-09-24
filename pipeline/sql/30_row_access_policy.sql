@@ -45,6 +45,13 @@ GRANT ROLE {{SECURITY_ROLE}} TO ROLE SYSADMIN;
 -- Snowflake users here. Two demo principals are added so the policy can be shown
 -- working end to end: one scoped to a single L4 territory, one scoped to an L2
 -- parent so hierarchical inheritance is visible.
+--
+-- Deleted before inserting, keyed on LOAD_ID: a plain INSERT duplicates these two
+-- rows on every re-run. The policy is EXISTS-based so duplicates do not change
+-- who sees what, which is exactly why this would have gone unnoticed.
+
+DELETE FROM {{KB_DB}}.KNOWLEDGE_BASE.KB_SECURITY_MAPPING
+WHERE LOAD_ID = 'demo-principals';
 
 INSERT INTO {{KB_DB}}.KNOWLEDGE_BASE.KB_SECURITY_MAPPING
     (SOURCE_SYSTEM, SOURCE_MODEL, PRINCIPAL, ROLE_GROUP, COLUMN_NAME, COLUMN_VALUE, ENTITY_NAME, LOAD_ID)
@@ -59,6 +66,16 @@ FROM SALES_ANALYTICS.TERRITORY_SITE_SALES_PERSON;
 -- ---------------------------------------------------------------------
 -- The policy
 -- ---------------------------------------------------------------------
+-- Detached before it is replaced. Snowflake permits CREATE OR REPLACE on a row
+-- access policy only while it is unattached: once any table references it, the
+-- replace is refused with "cannot be dropped/replaced as it is associated with
+-- one or more entities", so a second run of this phase fails where the first
+-- succeeded. DROP ALL ROW ACCESS POLICIES is the idempotent form -- it is not an
+-- error when nothing is attached, unlike DROP ROW ACCESS POLICY <name>, so this
+-- works on a first build and a rebuild alike.
+
+ALTER TABLE SALES_ANALYTICS.TERRITORY_SITE_SALES_PERSON
+  DROP ALL ROW ACCESS POLICIES;
 
 CREATE OR REPLACE ROW ACCESS POLICY SALES_ANALYTICS.{{POLICY}}
   AS (TERRITORY_LEVEL4 VARCHAR) RETURNS BOOLEAN ->

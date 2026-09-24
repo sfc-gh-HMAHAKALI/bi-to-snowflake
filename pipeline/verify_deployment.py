@@ -17,11 +17,22 @@ import config
 
 _ap = argparse.ArgumentParser(description=__doc__)
 _ap.add_argument("--connection", default="default")
+_ap.add_argument("--deploy",
+                choices=["all", "both", "streamlit", "react", "none", "local", "skip"],
+                default="all",
+                help="Which surfaces the build actually deployed, mirroring "
+                     "build.py's own --deploy. Checks for a surface that was "
+                     "never deployed are reported as skipped rather than failing "
+                     "(default: %(default)s)")
 config.add_arguments(_ap)
 _args = _ap.parse_args()
 naming = config.from_args(_args)
 DB = naming.database
 ANALYTICS = naming.analytics
+
+_deploy = (_args.deploy or "all").lower().strip()
+WANT_STREAMLIT = _deploy in ("all", "both", "streamlit")
+WANT_REACT = _deploy in ("all", "both", "react")
 
 conn = snowflake.connector.connect(connection_name=_args.connection)
 cur = conn.cursor()
@@ -40,6 +51,7 @@ def show(sql):
 
 
 checks = []
+skipped = []
 
 # Every dataset either app can request.
 for name, view in [
@@ -61,32 +73,44 @@ for name, view in [
 
 n = one(f"""SELECT COUNT(*) FROM {DB}.INFORMATION_SCHEMA.SEMANTIC_METRICS
             WHERE SEMANTIC_VIEW_NAME = '{naming.semantic_view}'""")[0]
-checks.append(("semantic view metrics", str(n), n == 98))
+# Count, not a fixed number: 98 is what one source model happened to yield, and
+# asserting it turns "a different model" into "a failed verification".
+checks.append(("semantic view metrics", str(n), n > 0))
 
-svcs = show(f"SHOW APPLICATION SERVICES IN SCHEMA {ANALYTICS}")
-svc = svcs[0] if svcs else {}
-# SUSPENDED and SUSPENDING are healthy states, not failures. The service auto-suspends
-# after 300s idle and AUTO_RESUME brings it back on the next request, so a check that
-# insists on RUNNING fails purely as a function of how recently someone opened the app.
-healthy_states = {"RUNNING", "SUSPENDED", "SUSPENDING", "RESUMING", "PENDING"}
-checks.append(("React APPLICATION SERVICE",
-               f"{svc.get('name')} status={svc.get('status')} "
-               f"auto_resume={svc.get('auto_resume')}",
-               str(svc.get("status")).upper() in healthy_states
-               and str(svc.get("auto_resume")).lower() == "true"))
-checks.append(("React app has an endpoint",
-               str(svc.get("url") or "(none)"),
-               bool(svc.get("url"))))
+# A build run with --deploy none (wizard.md's "both local") creates neither the
+# APPLICATION SERVICE nor the STREAMLIT object, so probing for them raises
+# "does not exist or not authorized" and the whole suite dies on a build that did
+# exactly what was asked of it.
+if WANT_REACT:
+    svcs = show(f"SHOW APPLICATION SERVICES IN SCHEMA {ANALYTICS}")
+    svc = svcs[0] if svcs else {}
+    # SUSPENDED and SUSPENDING are healthy states, not failures. The service auto-suspends
+    # after 300s idle and AUTO_RESUME brings it back on the next request, so a check that
+    # insists on RUNNING fails purely as a function of how recently someone opened the app.
+    healthy_states = {"RUNNING", "SUSPENDED", "SUSPENDING", "RESUMING", "PENDING"}
+    checks.append(("React APPLICATION SERVICE",
+                   f"{svc.get('name')} status={svc.get('status')} "
+                   f"auto_resume={svc.get('auto_resume')}",
+                   str(svc.get("status")).upper() in healthy_states
+                   and str(svc.get("auto_resume")).lower() == "true"))
+    checks.append(("React app has an endpoint",
+                   str(svc.get("url") or "(none)"),
+                   bool(svc.get("url"))))
+else:
+    skipped.append("React APPLICATION SERVICE (--deploy %s)" % _deploy)
 
-# runtime_name is not in SHOW STREAMLITS output, so read it where it actually lives.
-desc = show(f"DESCRIBE STREAMLIT {ANALYTICS}.{naming.streamlit}")
-d = desc[0] if desc else {}
-checks.append(("Streamlit on container runtime",
-               f"{d.get('name')} runtime={d.get('runtime_name')} pool={d.get('compute_pool')}",
-               "CONTAINER" in str(d.get("runtime_name", "")).upper()))
-checks.append(("Streamlit has a live version",
-               str(d.get("live_version_location_uri") or "(none)"),
-               bool(d.get("live_version_location_uri"))))
+if WANT_STREAMLIT:
+    # runtime_name is not in SHOW STREAMLITS output, so read it where it actually lives.
+    desc = show(f"DESCRIBE STREAMLIT {ANALYTICS}.{naming.streamlit}")
+    d = desc[0] if desc else {}
+    checks.append(("Streamlit on container runtime",
+                   f"{d.get('name')} runtime={d.get('runtime_name')} pool={d.get('compute_pool')}",
+                   "CONTAINER" in str(d.get("runtime_name", "")).upper()))
+    checks.append(("Streamlit has a live version",
+                   str(d.get("live_version_location_uri") or "(none)"),
+                   bool(d.get("live_version_location_uri"))))
+else:
+    skipped.append("Streamlit object (--deploy %s)" % _deploy)
 
 # The agent, through the route both apps use.
 cur.execute(f"CALL {ANALYTICS}.{naming.ask_procedure}(%s, %s)",
@@ -106,9 +130,12 @@ checks.append(("agent answer not duplicated",
 checks.append(("agent exposes its SQL",
                "yes" if result.get("sql") else "no",
                bool(result.get("sql"))))
-checks.append(("agent figure present",
-               "37,711,379 in answer" if "37,711,379" in answer else "figure absent",
-               "37,711,379" in answer))
+# Present, not a specific value: the figure is whatever the source model holds.
+# Asserting one account's number makes every other model fail verification.
+_figure = re.search(r"[\d,]{7,}", answer)
+checks.append(("agent quotes a figure",
+               f"{_figure.group(0)} in answer" if _figure else "no figure in answer",
+               bool(_figure)))
 
 # The calendar boundary finding, as a regression test. If someone later "fixes" one of the
 # two row filters, this stops reconciling and the walkthrough's headline number is stale.
@@ -129,7 +156,7 @@ checks.append(("boundary gap reconciles",
 # adjusts the derived fiscal-start expression. Second, that the metric exposure counts
 # still hold, because the document quotes them.
 fy_start, cal_start, fiscal_ytd, cal_ytd, n_metrics, n_blocked, n_hardcoded = one(
-    """SELECT FISCAL_START, CALENDAR_START, FISCAL_YTD, CALENDAR_YTD,
+    f"""SELECT FISCAL_START, CALENDAR_START, FISCAL_YTD, CALENDAR_YTD,
               TOTAL_METRICS, BLOCKER_METRICS, HARDCODED
          FROM {ANALYTICS}.RPT_FISCAL_CALENDAR_EXPOSURE""")
 
@@ -151,14 +178,16 @@ checks.append(("fiscal-calendar metric exposure",
                int(n_blocked) > 0 and int(n_metrics) > 0
                and int(n_blocked) < int(n_metrics)))
 
-grants = show("SHOW CALLER GRANTS TO ROLE ACCOUNTADMIN")
-relevant = [g for g in grants
-            if str(g.get("name") or "").upper().startswith(DB)
-            or g.get("name") == "AI_ML_WH_SALES"
-            or (g.get("inherited_from_database") == DB)]
-checks.append(("caller grants for the app",
-               f"{len(relevant)} on {DB} objects",
-               len(relevant) >= 6))
+if WANT_REACT:
+    grants = show("SHOW CALLER GRANTS TO ROLE ACCOUNTADMIN")
+    relevant = [g for g in grants
+                if str(g.get("name") or "").upper().startswith(DB)
+                or (g.get("inherited_from_database") == DB)]
+    checks.append(("caller grants for the app",
+                   f"{len(relevant)} on {DB} objects",
+                   len(relevant) >= 6))
+else:
+    skipped.append("caller grants (--deploy %s)" % _deploy)
 
 # The React app must only read objects inside the target analytics schema.
 #
@@ -176,7 +205,13 @@ checks.append(("caller grants for the app",
 # *whose* rights are in play, which a connection from here cannot reproduce.
 queries_ts = pathlib.Path(__file__).with_name("app_react") / "lib" / "queries.ts"
 if not queries_ts.exists():
-    checks.append(("React reads only ANALYTICS", f"{queries_ts} not found", False))
+    # Absent is a failure only if a React app was supposed to exist. The app
+    # source is composed per model, so on a local-only build there is nothing to
+    # scan and saying so is the honest result.
+    if WANT_REACT:
+        checks.append(("React reads only ANALYTICS", f"{queries_ts} not found", False))
+    else:
+        skipped.append("React query scope scan (no app_react/ composed)")
 else:
     src = queries_ts.read_text()
     # Only the SQL template literals, not the surrounding prose. The comments in that file
@@ -205,5 +240,7 @@ for key, detail, ok in checks:
     failed += (not ok)
 
 print(f"\n{len(checks) - failed}/{len(checks)} checks passed")
+for s in skipped:
+    print(f"  SKIP  {s}")
 print("\nNot covered here, deliberately: how either app renders. That needs a browser.")
 sys.exit(1 if failed else 0)

@@ -141,7 +141,10 @@ def rows(cur, sql: str) -> list[tuple]:
     return cur.fetchall()
 
 
-def build(cur) -> dict:
+def build(cur, naming: config.Naming) -> dict:
+    kb = naming.kb
+    db = naming.database
+    semantic_view = naming.semantic_view
     scope_list = ", ".join(f"'{e}'" for e in IN_SCOPE)
 
     # Dimensions: attributes on in-scope entities. PHYSICAL_COLUMN is what the
@@ -171,7 +174,7 @@ def build(cur) -> dict:
         name: {"definition": defn or "", "format": fmt or "number",
                "decimals": dec if dec is not None else 0,
                "currency": ccy or "", "certified": bool(cert)}
-        for name, defn, fmt, dec, ccy, cert in rows(cur, """
+        for name, defn, fmt, dec, ccy, cert in rows(cur, f"""
             SELECT METRIC_NAME, DEFINITION, FORMAT_KIND, FORMAT_DECIMALS,
                    CURRENCY_CODE, IS_CERTIFIED
             FROM {kb}.KB_METRIC
@@ -179,7 +182,7 @@ def build(cur) -> dict:
     }
 
     measures = []
-    for (name,) in rows(cur, """
+    for (name,) in rows(cur, f"""
         SELECT NAME FROM {db}.INFORMATION_SCHEMA.SEMANTIC_METRICS
         WHERE SEMANTIC_VIEW_NAME = '{semantic_view}' ORDER BY NAME
     """):
@@ -198,20 +201,30 @@ def build(cur) -> dict:
     # Drill paths, in declared level order. These are the hierarchies the Cognos
     # model declares -- the one part of the app's navigation that is genuinely
     # extracted rather than designed.
-    hierarchies: dict[tuple[str, str], list[dict]] = {}
-    for dim, hier, ordinal, level, caption in rows(cur, """
-        SELECT l.DIMENSION_NAME, l.HIERARCHY_NAME, l.LEVEL_ORDINAL,
-               l.LEVEL_NAME, l.CAPTION_TERM
+    #
+    # Scoped to IN_SCOPE, like `dims` above. Unscoped, this returns every named
+    # set and calculation grouping in the whole source model ("Time Cube",
+    # "MTD Grouped", "Copy of UNKNOWN") -- hundreds of entries, almost none of
+    # which map to a column the deployed semantic view can query. Each entry
+    # also carries source_entity, so composition-rules.md's "whose root
+    # dimension appears in a fact-joined table" filter can be applied
+    # mechanically instead of by eye.
+    hierarchies: dict[tuple[str, str, str], list[dict]] = {}
+    for dim, hier, entity, ordinal, level, caption in rows(cur, f"""
+        SELECT l.DIMENSION_NAME, l.HIERARCHY_NAME, l.SOURCE_ENTITY,
+               l.LEVEL_ORDINAL, l.LEVEL_NAME, l.CAPTION_TERM
         FROM {kb}.KB_HIERARCHY_LEVEL l
         WHERE COALESCE(l.IS_ALL_LEVEL, FALSE) = FALSE
+          AND l.SOURCE_ENTITY IN ({scope_list})
         ORDER BY l.DIMENSION_NAME, l.HIERARCHY_NAME, l.LEVEL_ORDINAL
     """):
-        hierarchies.setdefault((dim, hier), []).append(
+        hierarchies.setdefault((dim, hier, entity), []).append(
             {"ordinal": int(ordinal), "level": level, "caption": caption})
 
     drill_paths = [
-        {"dimension": d, "hierarchy": h, "levels": lv}
-        for (d, h), lv in hierarchies.items() if len(lv) > 1
+        {"dimension": d, "hierarchy": h, "source_entity": e,
+         "table": IN_SCOPE[e][0], "levels": lv}
+        for (d, h, e), lv in hierarchies.items() if len(lv) > 1
     ]
 
     tables = [
@@ -252,14 +265,16 @@ def build(cur) -> dict:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--connection", default="my-demo-account")
+    config.add_arguments(ap)
     ap.add_argument("-o", "--output",
                     default=os.path.join(HERE, "out", "bim_inventory.json"))
     args = ap.parse_args(argv)
+    naming = config.from_args(args)
 
     conn = connect(args.connection)
     try:
         cur = conn.cursor()
-        inv = build(cur)
+        inv = build(cur, naming)
     finally:
         conn.close()
 

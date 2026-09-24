@@ -114,6 +114,66 @@ Each of these exists because its absence produced a visible bug in the reference
   sum only across non-time dimensions. Note: no measure in the reference model triggers
   this -- 0 of 4,070 rules -- so the rule is untested against real data and exists for
   models that do declare it.
+- **Label the null bucket, never drop it.** Both chart libraries' `rollup()` skip an empty,
+  `null` or `undefined` key by design, so a dimension with unattributed rows produces bars
+  that quietly exclude them and stop agreeing with the KPI band above. Map null to
+  `(unattributed)` *before* handing rows to any chart, and state the share in the subtitle.
+  In the reference build 33.2% of revenue ($93.1M of $280.1M) arrived with `CUSTOMER_NAME`,
+  `CUSTOMER_TIER1` and `STATE` all null; territory and product were clean, which is exactly
+  why spot-checking two dimensions gave false confidence. This is the "fold tails into
+  `Other (N)`" rule arriving through a different door: dropping nulls makes the total wrong
+  just as silently as dropping a tail.
+- **Tie one chart total back to the KPI band, on every page.** Sum the ranked view's measure
+  and assert it equals the KPI. This is the single cheapest check that catches both of the
+  rules above, and it is what caught the null bucket.
+- **Measure a candidate axis's cardinality before composing against it.** A ranked bar over a
+  dimension with one distinct value is a full-width bar restating the KPI and answering
+  nothing -- `CUSTOMER_COUNTRY` has cardinality 1 in the reference model, and both apps were
+  first composed with that mistake. One category is not a chart, and two rarely is. Rank by
+  something with at least three.
+- **Check the title against the props, every time.** Two panels shipped titles their data
+  could not support: "Product mix by fiscal year" built from a view with no time column at
+  all, and "Sales by region and fiscal year" with no region in it. A title written for the
+  intended chart rather than the frame actually passed in is worse than a missing chart,
+  because it is quotable.
+
+## Runtime traps a composed app hits every time
+
+These are not judgement calls. Both cost a working app in the reference build, and both
+pass every local test.
+
+- **Never hardcode a bind placeholder.** `snowflake-connector-python` defaults to
+  `paramstyle = "pyformat"`, so `%s` works from a REPL, from a script, and from `data.py`
+  imported directly. But `bim_ui/compat.py` probes `st.connection(...)` at import time to
+  detect Snowsight, and constructing a Snowpark session sets
+  `snowflake.connector.paramstyle = "qmark"` *for the whole process* -- after which every
+  `%s` in the app stops binding. It surfaces as a SQL *syntax* error
+  (`unexpected '%'`), not a binding error, from a UI shim that has nothing to do with
+  query parameters. Resolve it at call time:
+
+  ```python
+  ph = "?" if snowflake.connector.paramstyle == "qmark" else "%s"
+  cur.execute(f"CALL {ASK_PROC}({ph}, {ph})", (question, ASK_CONTEXT))
+  ```
+
+- **Render the agent's markdown.** The agent replies in markdown. Streamlit gets that free
+  from `st.markdown`; a React `whitespace-pre-wrap` div shows `**$92,322,705**` verbatim and
+  reads as a data bug. Render a known subset (bold, dash bullets) into React elements. Do
+  not use `dangerouslySetInnerHTML` -- then nothing the agent returns can inject markup, and
+  no dependency is added.
+
+- **The agent's result table does not survive the bridge.** `33_agent_sql_bridge.sql::_parse`
+  returns `{answer, sql, error}`: it reads `sql` off the `tool_result` event but drops that
+  event's row payload, so an answer ending "...in descending order:" is followed by nothing.
+  Until the bridge returns `rows` too, re-run the returned SQL in the app and render it --
+  accepting only a statement that begins `SELECT` or `WITH`, and degrading to no table on
+  failure. The statement was generated
+  against the semantic view and the territory row access policy applies to the re-run
+  exactly as it did to the agent.
+
+- **Do not run `next build` while `next dev` is running.** Both write the same `.next`
+  directory and the result is a `MODULE_NOT_FOUND` through `webpack-runtime.js` with nothing
+  wrong in the source. Stop the dev server, `rm -rf .next`, rebuild.
 
 ## Honest labelling
 

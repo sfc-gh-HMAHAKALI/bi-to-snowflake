@@ -49,6 +49,21 @@ class Naming:
 
     @property
     def semantic_view(self) -> str:
+        """The deployed semantic view name -- prefixed, like every other object.
+
+        This is load-bearing in a way the other properties are not.
+        ``path3_ossie_semantic_view.py`` must name the OSSIE document's top-level
+        ``name:`` from *this* property, because that field is what Snowflake
+        actually creates. If the two disagree, every ``{{SEMANTIC_VIEW}}``
+        rendered into ``32_agent.sql``, ``45_reporting_views.sql`` and
+        ``51_caller_grants.sql`` refers to an object that was never created --
+        and none of that DDL validates the reference at creation time, so the
+        whole build reports ok and fails the first time someone asks the agent a
+        question. Do not special-case the semantic view out of the prefix.
+
+        Corollary: do not bake the prefix into ``--model-name`` as well, or the
+        deployed object is prefixed twice.
+        """
         return "%s_%s" % (self.prefix, self.model_name)
 
     @property

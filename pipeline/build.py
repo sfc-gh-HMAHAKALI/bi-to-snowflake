@@ -60,6 +60,13 @@ class Phase:
     # Which paths need this phase. Empty means foundation -- always run.
     paths: tuple[int, ...] = ()
     note: str = ""
+    # Phase keys that must have already run. Declared, not inferred: list order
+    # used to be the only record of these, and it was wrong -- the inventory
+    # bridge was ordered before the semantic view it reads, and the symptom
+    # ("no measures found") arrived at phase 10 looking like an empty knowledge
+    # base. Anything relied on here is asserted by check_order() at plan time,
+    # so a future reordering fails before the first object is created.
+    depends_on: tuple[str, ...] = ()
 
 
 FOUNDATION: list[Phase] = [
@@ -104,30 +111,35 @@ PATH_PHASES: list[Phase] = [
           "path3_ossie_semantic_view.py", ["--deploy", "--round-trip"], paths=(3, 4),
           note="Created BY Snowflake's Ossie importer; exports back to YAML"),
     Phase("p3-rls", "Row access policy", "sql", "sql/30_row_access_policy.sql", paths=(3, 4),
-          note="19,051 Cognos filters collapse to one policy"),
+          note="19,051 Cognos filters collapse to one policy",
+          depends_on=("dim-data",)),
     Phase("p3-search", "Cortex Search over the glossary", "sql", "sql/31_glossary_search.sql",
           paths=(3, 4), note="Lets the agent answer definitional questions from governed text"),
-    Phase("p3-agent", "Cortex Agent", "sql", "sql/32_agent.sql", paths=(3, 4)),
+    Phase("p3-agent", "Cortex Agent", "sql", "sql/32_agent.sql", paths=(3, 4),
+          depends_on=("p3-ossie", "p3-search")),
     # Makes the agent callable from SQL. Needed by both app surfaces rather than by
     # path 3 alone: the Streamlit container runtime has no `_snowflake` module and the
     # React app should not reimplement the event-stream parse in TypeScript.
     Phase("p3-agent-sql", "SQL bridge to the agent", "sql",
           "sql/33_agent_sql_bridge.sql", paths=(3, 4),
-          note="one stored procedure both apps and any JDBC client can use"),
+          note="one stored procedure both apps and any JDBC client can use",
+          depends_on=("p3-agent",)),
 
     # Reporting views. Required by path 2 because SEMANTIC_VIEW() is its own query
     # syntax that no ordinary SQL client -- including the Node driver the React app
     # uses -- can speak.
     Phase("p2-views", "Reporting views over the semantic view", "sql",
           "sql/45_reporting_views.sql", paths=(2, 4),
-          note="7 RPT_ views, so plain-SQL clients read the governed definitions"),
+          note="7 RPT_ views, so plain-SQL clients read the governed definitions",
+          depends_on=("p3-ossie",)),
 
     # Paths 2 and 4 are the same surfaces: a report with the agent embedded in it. A
     # chat panel that cannot see the report's filter state is a separate product, not
     # an embedded assistant, so they deploy together.
     Phase("p24-streamlit", "Deploy the Streamlit report (container runtime)", "app",
           "sql/50_deploy_streamlit.sql", paths=(2, 4),
-          note="STREAMLIT object on a compute pool, dependencies pinned via PyPI repo"),
+          note="STREAMLIT object on a compute pool, dependencies pinned via PyPI repo",
+          depends_on=("bridge", "p2-views")),
     # Must precede the React deploy. Without these the app deploys and runs, and every
     # query fails with "does not exist or not authorized" -- which reads as a missing
     # object rather than a missing grant, and is the single most confusing failure in
@@ -138,13 +150,37 @@ PATH_PHASES: list[Phase] = [
                "already holds, and only where a caller grant allows it"),
     Phase("p24-react", "Deploy the React report (App Runtime)", "react",
           "app_react", paths=(2, 4),
-          note="APPLICATION SERVICE via snow app deploy; needs CLI 3.15+"),
+          note="APPLICATION SERVICE via snow app deploy; needs CLI 3.15+",
+          depends_on=("bridge", "p2-views", "p24-grants")),
 ]
 
 FOUNDATION_BRIDGE = Phase(
     "bridge", "Knowledge base to app inventory", "py", "kb_to_inventory.py",
     paths=(2, 4),
-    note="217 dimensions, 98 measures, 318 drill paths -- what the React generator reads")
+    note="Dimensions, measures and drill paths for the in-scope entities -- what the app generators read",
+    # Reads INFORMATION_SCHEMA.SEMANTIC_METRICS off the deployed semantic view.
+    depends_on=("p3-ossie",))
+
+
+def check_order(plan: list[Phase]) -> list[str]:
+    """Report any phase whose declared dependencies are not already satisfied.
+
+    Called at plan time, before anything is created. A dependency on a phase that
+    the requested --paths excluded is not an error: the object may already exist
+    from an earlier build, and refusing to run would make incremental builds
+    impossible. Ordering *within* the plan is the invariant worth enforcing.
+    """
+    problems = []
+    seen: set[str] = set()
+    in_plan = {p.key for p in plan}
+    for phase in plan:
+        for need in phase.depends_on:
+            if need in in_plan and need not in seen:
+                problems.append(
+                    "phase %r runs before %r, which it depends on"
+                    % (phase.key, need))
+        seen.add(phase.key)
+    return problems
 
 
 def expand(paths: set[int]) -> set[int]:
@@ -169,11 +205,6 @@ def resolve(paths: set[int], with_extract: bool, with_physical: bool,
     if with_physical:
         plan += PHYSICAL
     effective = expand(paths)
-    # The bridge runs before the path phases that consume it, and only when an app is
-    # actually being built -- it reads the knowledge base and writes a file, so running it
-    # for a catalog-only build would be work nobody asked for.
-    if effective & set(FOUNDATION_BRIDGE.paths):
-        plan.append(FOUNDATION_BRIDGE)
 
     phases = [p for p in PATH_PHASES if effective & set(p.paths)]
     deploy_norm = (deploy or "all").lower().strip()
@@ -183,6 +214,19 @@ def resolve(paths: set[int], with_extract: bool, with_physical: bool,
         phases = [p for p in phases if p.key not in ("p24-grants", "p24-react")]
     elif deploy_norm == "react":
         phases = [p for p in phases if p.key != "p24-streamlit"]
+
+    # The bridge sits between path 3 and path 2, not before both. It reads
+    # INFORMATION_SCHEMA.SEMANTIC_METRICS for the semantic view, so it must run
+    # *after* p3-ossie creates that view and *before* the p2 phases that consume
+    # its inventory file. Appending it with the foundation phases instead -- as
+    # this did -- made it query a view that did not exist yet and report
+    # "no measures found", which reads like an empty knowledge base and is not.
+    # Only run it when an app is actually being built: it writes a file nobody
+    # asked for on a catalog-only build.
+    if effective & set(FOUNDATION_BRIDGE.paths):
+        insert_at = next((i for i, p in enumerate(phases)
+                          if p.key.startswith("p2")), len(phases))
+        phases.insert(insert_at, FOUNDATION_BRIDGE)
 
     plan += phases
     return plan
@@ -580,6 +624,7 @@ def main(argv=None) -> int:
 
     issues = preflight(paths, bool(args.extract), not args.skip_physical, args.connection)
     issues += missing_app_source(plan)
+    issues += check_order(plan)
     if issues:
         print("PREFLIGHT FAILED")
         for i in issues:

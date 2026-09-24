@@ -170,6 +170,63 @@ FROM f;
 """
 
 
+def fetch_core_columns(kb_database: str, kb_schema: str, connection: str) -> list[dict]:
+    """Query the KB for the columns of the six core entities.
+
+    ``main()`` used to simply assume ``out/core_columns.json`` already existed,
+    which meant an undocumented manual query stood between a loaded KB and a
+    buildable physical layer. Nothing in the repo produced that file.
+
+    ``CORE_ENTITIES`` holds *canonical* (unsuffixed) entity names, so a model
+    with fiscal-year clone families still resolves -- the extractor emits one
+    canonical ``KB_ENTITY`` row per entity with an empty ``CLONE_VARIANT``
+    alongside the suffixed clones. A model whose clone family does not produce
+    that canonical row would come back empty, which is why this raises rather
+    than writing an empty file.
+    """
+    from path3_ossie_semantic_view import CORE_ENTITIES
+
+    names = ", ".join("'" + e + "'" for e in CORE_ENTITIES)
+    sql = f"""
+        SELECT t.ENTITY_NAME, t.TERM_NAME, t.PHYSICAL_COLUMN, t.DATA_TYPE,
+               t.TERM_ROLE, b.PHYSICAL_SCHEMA, b.PHYSICAL_OBJECT
+        FROM {kb_database}.{kb_schema}.KB_TERM t
+        JOIN {kb_database}.{kb_schema}.KB_V_PHYSICAL_BINDING b
+          ON b.SOURCE_SYSTEM = t.SOURCE_SYSTEM
+         AND b.SOURCE_MODEL  = t.SOURCE_MODEL
+         AND b.ENTITY_NAME   = t.ENTITY_NAME
+        WHERE t.ENTITY_NAME IN ({names})
+          AND t.PHYSICAL_COLUMN IS NOT NULL
+        ORDER BY b.PHYSICAL_SCHEMA, b.PHYSICAL_OBJECT, t.PHYSICAL_COLUMN
+    """
+    with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False,
+                                    encoding="utf-8") as fh:
+        fh.write(sql)
+        path = fh.name
+    try:
+        proc = subprocess.run(
+            ["snow", "sql", "-f", path, "-c", connection, "--format", "json"],
+            capture_output=True, text=True,
+        )
+    finally:
+        os.unlink(path)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "core column query failed:\n"
+            + (proc.stdout or "")[-4000:] + (proc.stderr or "")[-4000:]
+        )
+    i = proc.stdout.find("[")
+    columns = json.loads(proc.stdout[i:]) if i >= 0 else []
+    if not columns:
+        raise RuntimeError(
+            f"no core columns found in {kb_database}.{kb_schema}.KB_TERM for "
+            f"{', '.join(CORE_ENTITIES)}. Load the knowledge base first, and "
+            "check that each core entity has a canonical (CLONE_VARIANT = '') "
+            "row in KB_ENTITY."
+        )
+    return columns
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Generate the physical layer from the KB")
     ap.add_argument("--columns", default="out/core_columns.json")
@@ -178,6 +235,16 @@ def main(argv=None) -> int:
     ap.add_argument("--out-dir", default="sql")
     ap.add_argument("--execute", action="store_true", help="Run the generated SQL")
     args = ap.parse_args(argv)
+    naming = config.from_args(args)
+
+    if not os.path.exists(args.columns):
+        print(f"{args.columns} absent: querying the knowledge base for it")
+        columns = fetch_core_columns(naming.kb_database, naming.kb_schema,
+                                     args.connection)
+        os.makedirs(os.path.dirname(args.columns) or ".", exist_ok=True)
+        with open(args.columns, "w", encoding="utf-8") as f:
+            json.dump(columns, f, indent=2)
+        print(f"  wrote {args.columns}: {len(columns)} columns")
 
     with open(args.columns, encoding="utf-8") as f:
         columns = json.load(f)
@@ -193,20 +260,26 @@ def main(argv=None) -> int:
         f"  COMMENT = 'Physical layer, schema generated from the semantic knowledge base';\n"
     )
 
+    # This script builds and runs its own SQL instead of going through
+    # build.py's run_sql_file(), which renders placeholders automatically -- so
+    # the date template has to be rendered explicitly here. Forgetting it sends
+    # a literal USE DATABASE {{DB}} to Snowflake.
+    date_sql = config.render_sql(data_date_dimension(), naming)
+
     path = os.path.join(args.out_dir, "10_physical_layer.sql")
     with open(path, "w", encoding="utf-8") as f:
-        f.write(header + core + extra)
+        f.write(header + core)
     print(f"wrote {path}")
 
     date_path = os.path.join(args.out_dir, "11_date_dimension.sql")
     with open(date_path, "w", encoding="utf-8") as f:
-        f.write(data_date_dimension())
+        f.write(date_sql)
     print(f"wrote {date_path}")
 
     if args.execute:
         print("executing:")
-        run_sql(header + core + extra, args.connection, "physical layer DDL")
-        run_sql(data_date_dimension(), args.connection, "date dimension")
+        run_sql(header + core, args.connection, "physical layer DDL")
+        run_sql(date_sql, args.connection, "date dimension")
 
     return 0
 

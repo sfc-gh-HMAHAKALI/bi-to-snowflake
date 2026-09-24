@@ -426,8 +426,15 @@ def _expr(sql: str) -> dict:
     }
 
 
-def build_ossie_model(connection: str, database: str, model_name: str) -> dict:
-    """Build the Ossie document from the knowledge base."""
+def build_ossie_model(connection: str, database: str, model_name: str,
+                     model_label: str) -> dict:
+    """Build the Ossie document from the knowledge base.
+
+    ``model_label`` is threaded in rather than read off a module-level naming
+    object: there isn't one in this scope, and the three sibling scripts that
+    tried the same shortcut each shipped a NameError that only fired once the
+    provenance block was reached, several minutes into a build.
+    """
     terms = query_json(
         f"""
         SELECT t.ENTITY_NAME, t.TERM_NAME, t.PHYSICAL_COLUMN, t.DEFINITION,
@@ -666,7 +673,7 @@ def build_ossie_model(connection: str, database: str, model_name: str) -> dict:
                         "provenance": {
                             "knowledge_base": KB,
                             "source_system": "cognos",
-                            "source_model": naming.model_label,
+                            "source_model": model_label,
                         },
                         "known_limitations": [
                             "Metrics requiring the fiscal calendar are excluded from "
@@ -741,6 +748,19 @@ def main(argv=None) -> int:
     ap.add_argument("--round-trip", action="store_true", help="Export back to OSI and diff")
     args = ap.parse_args(argv)
 
+    # Every function below reads the module-level KB. It starts at the packaged
+    # default, so without this rebind --kb-database is accepted and ignored.
+    naming = config.from_args(args)
+    global KB
+    KB = naming.kb
+
+    # argparse documented this default in help text only, so it stayed None and
+    # reached Snowflake as the literal identifier None inside a 160KB CALL --
+    # reported there as "unexpected number of qualifiers", which reads like a
+    # YAML content problem and is not one.
+    if not args.target_schema:
+        args.target_schema = naming.analytics
+
     os.makedirs(args.out_dir, exist_ok=True)
 
     # Validate before generating: if the inline fiscal rule does not match the
@@ -758,11 +778,20 @@ def main(argv=None) -> int:
             "Fiscal metrics would be wrong; fix the rule before relying on them."
         )
 
+    # The deployed object name comes from Naming, not from model_name directly.
+    # The OSSIE YAML's top-level `name:` *is* the created object, so if it
+    # disagrees with naming.semantic_view then every {{SEMANTIC_VIEW}} rendered
+    # into the agent, the search service and the RPT_ views points at something
+    # that was never created -- and none of that DDL validates the reference at
+    # creation time, so all of it reports ok and fails at first question asked.
+    view_name = naming.semantic_view
+
     print("building Ossie model from the knowledge base")
-    model = build_ossie_model(args.connection, args.database, args.model_name)
+    model = build_ossie_model(args.connection, args.database, view_name,
+                              naming.model_label)
     yaml_text = to_yaml(model) + "\n"
 
-    p = os.path.join(args.out_dir, f"{args.model_name.lower()}.ossie.yaml")
+    p = os.path.join(args.out_dir, f"{view_name.lower()}.ossie.yaml")
     with open(p, "w", encoding="utf-8") as f:
         f.write(yaml_text)
     print(
@@ -770,7 +799,7 @@ def main(argv=None) -> int:
         f"{sum(len(d['fields']) for d in model['datasets'])} fields, "
         f"{len(model['relationships'])} relationships, {len(model['metrics'])} metrics"
     )
-    with open(os.path.join(args.out_dir, f"{args.model_name.lower()}.ossie.json"), "w",
+    with open(os.path.join(args.out_dir, f"{view_name.lower()}.ossie.json"), "w",
               encoding="utf-8") as f:
         json.dump(model, f, indent=2)
 
@@ -788,7 +817,7 @@ def main(argv=None) -> int:
 
     if args.round_trip:
         print("round-tripping via SYSTEM$READ_OSSIE_YAML_FROM_SEMANTIC_VIEW")
-        fq = f"{args.target_schema}.{args.model_name}"
+        fq = f"{args.target_schema}.{view_name}"
         out = run_snow(
             f"SELECT SYSTEM$READ_OSSIE_YAML_FROM_SEMANTIC_VIEW('{fq}') AS OSSIE;",
             args.connection,
@@ -798,7 +827,7 @@ def main(argv=None) -> int:
         rows = json.loads(out[i:]) if i >= 0 else []
         if rows:
             exported = rows[0].get("OSSIE", "")
-            rp = os.path.join(args.out_dir, f"{args.model_name.lower()}.roundtrip.ossie.yaml")
+            rp = os.path.join(args.out_dir, f"{view_name.lower()}.roundtrip.ossie.yaml")
             with open(rp, "w", encoding="utf-8") as f:
                 f.write(exported)
             print(f"  wrote {rp} ({len(exported)} bytes)")

@@ -157,6 +157,20 @@ libraries. Write it to the paths the deploy phases read, or they will not find i
 `build.py` preflights this list whenever a deploy phase is in the plan, so a missing
 file is one message before anything is created rather than a failure at phase 15.
 
+**`--deploy none` skips that preflight**, because the deploy phases that trigger it are
+not in the plan. So on a local-only build you get no warning that the app source was
+never composed -- and `streamlit run pipeline/app_streamlit/app.py` then fails with a
+plain "no such file", which reads like a broken skill rather than a step not yet done.
+If you chose local dashboards, check the two directories yourself before telling anyone
+the build finished:
+
+```
+ls pipeline/app_streamlit/app.py pipeline/app_react/package.json
+```
+
+Composition is real work that happens on every run, not a one-time skill fix. Absent
+directories mean it has not happened yet.
+
 ## The confirmation gate
 
 Show this before creating anything. It is the last point at which a wrong target schema

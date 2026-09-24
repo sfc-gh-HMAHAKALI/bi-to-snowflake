@@ -97,6 +97,24 @@ def _base_layout(**overrides: Any) -> dict:
     return base
 
 
+def _num(v: Any) -> float:
+    """Coerce a measure value to float before this module does arithmetic on it.
+
+    The Snowflake connector returns NUMBER columns as ``decimal.Decimal``, and
+    every RPT_ view's measures are NUMBER. ``Decimal * float`` raises TypeError,
+    so an axis-headroom calculation like ``peak * 1.12`` blows up at render time
+    inside this library rather than in the page that forgot to cast. A composed
+    app should still cast in its own data layer -- this is a floor, not a
+    licence to skip that.
+    """
+    if v is None:
+        return 0.0
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def collapse_tail(df: pd.DataFrame, label_col: str, value_col: str,
                   *, max_categories: int = MAX_CATEGORIES) -> pd.DataFrame:
     """Keep the top N-1 categories and aggregate the rest into "Other".
@@ -129,7 +147,7 @@ def ranked_bar(df: pd.DataFrame, label_col: str, value_col: str, *,
     frame = frame.sort_values(value_col)
     labels = frame[label_col].astype(str).tolist()
     values = frame[value_col].tolist()
-    peak = max(values) if values else 0
+    peak = _num(max(values) if values else 0)
 
     active_vals = filters.active().get(emits or "", [])
     colours = [
@@ -181,7 +199,7 @@ def trend(df: pd.DataFrame, x_col: str, series: dict[str, str], *,
             marker={"size": 5},
             hovertemplate=f"{label} %{{x}}: %{{y:,.0f}}<extra></extra>",
         ))
-    peak = max((frame[c].max() for c in series if c in frame.columns), default=0)
+    peak = _num(max((frame[c].max() for c in series if c in frame.columns), default=0))
     fig.update_layout(**_base_layout(
         showlegend=True,
         # Legend above the plot so it cannot clip the rotated x-axis labels below. The
@@ -198,8 +216,14 @@ def trend(df: pd.DataFrame, x_col: str, series: dict[str, str], *,
 
 
 def grid(df: pd.DataFrame, label_col: str, *, title: str,
-         show_total: bool = True) -> None:
-    """Detail grid with derived column config and a correct total row."""
+         show_total: bool = True, key: str | None = None) -> None:
+    """Detail grid with derived column config and a correct total row.
+
+    ``key`` is accepted for signature parity with every other function here, all
+    of which require one. It is optional because this function renders no
+    selectable chart, but two grids on one page still collide on the download
+    button's key if they share a title -- pass ``key`` to disambiguate them.
+    """
     if bim_ui.guard(df, on_clear=filters.clear, what=title.lower()):
         return
     frame = df.copy()
@@ -232,7 +256,7 @@ def grid(df: pd.DataFrame, label_col: str, *, title: str,
     st.download_button(
         "Download CSV", frame.to_csv(index=False).encode("utf-8"),
         file_name=f"{title.lower().replace(' ', '_')}.csv", mime="text/csv",
-        key=f"dl_{title}",
+        key=f"dl_{key or title}",
     )
 
 
