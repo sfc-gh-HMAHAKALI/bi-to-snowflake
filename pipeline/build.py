@@ -28,6 +28,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -601,6 +602,68 @@ def app_source_status(paths: set[int]) -> list[str]:
     return notes
 
 
+def deploy_cli_report(plan: list[Phase]) -> str:
+    """Which `snow` the deploy phases will use, and what is first on PATH.
+
+    Printed whenever a plan deploys, because these are commonly different binaries
+    and the difference is actively misleading: a conda `snow` at 3.14 ahead of a pip
+    one at 3.28 makes `snow --version` report a number that looks like it needs
+    upgrading when nothing does. find_snow_cli() already searches past it. Saying so
+    out loud is cheaper than someone spending ten minutes on an install that changes
+    nothing.
+    """
+    if not any(p.kind in ("app", "react") for p in plan):
+        return ""
+    cli, version = find_snow_cli()
+    on_path = shutil.which("snow") or ""
+    path_ver = ""
+    if on_path:
+        probe = subprocess.run([on_path, "--version"], capture_output=True, text=True)
+        path_ver = (probe.stdout or probe.stderr or "").strip()
+    lines = ["App Runtime CLI: %s" % (version or "none found")]
+    if cli:
+        lines.append("  using: %s" % cli)
+        if on_path and os.path.realpath(on_path) != os.path.realpath(cli):
+            lines.append("  note:  `snow` first on PATH is a different binary -- %s"
+                         % (path_ver or on_path))
+            lines.append("         that one is not used here, and does not need upgrading.")
+    return "\n".join(lines)
+
+
+def missing_cli_for_deploy(plan: list[Phase]) -> list[str]:
+    """Refuse a plan that ends in a deploy no `snow` on this machine can perform.
+
+    The App Runtime commands only exist from CLI 3.15. On an older one `snow app
+    setup` fails with "No such command", which reads as a broken install rather than
+    an old one -- and the deploy phases run last, so a 3.14 machine builds the entire
+    backend, forty minutes of it, and only then discovers a prerequisite that was
+    knowable before anything was created.
+
+    This is a *precondition*, not a failure: it is true or false at second zero and
+    nothing the build does changes it. So it belongs in the preflight, next to the
+    empty-knowledge-base check, rather than at the phase that happens to need it.
+    """
+    if not any(p.kind in ("app", "react") for p in plan):
+        return []
+    cli, version = find_snow_cli()
+    if cli:
+        return []
+    have = shutil.which("snow")
+    found = ""
+    if have:
+        probe = subprocess.run([have, "--version"], capture_output=True, text=True)
+        found = (probe.stdout or probe.stderr or "").strip()
+    return [
+        "No `snow` CLI with App Runtime support, and this plan deploys an app.\n"
+        "    `snow app setup` needs CLI 3.15 or later; earlier builds expose only\n"
+        "    the Native App surface, where that command does not exist.\n"
+        "    %s\n"
+        "    Fix: pip install -U snowflake-cli\n"
+        "    Or re-run with --deploy none to build the backend only."
+        % ("Found: %s" % found if found else "No `snow` on PATH at all.")
+    ]
+
+
 def preflight(paths: set[int], with_extract: bool, with_physical: bool,
               connection: str) -> list[str]:
     """Refuse to run a plan whose outputs would be built from an empty input.
@@ -704,6 +767,11 @@ def main(argv=None) -> int:
             print(f"      {p.note}")
     print()
 
+    cli_report = deploy_cli_report(plan)
+    if cli_report:
+        print(cli_report)
+        print()
+
     if args.dry_run:
         print("dry run: nothing executed")
         return 0
@@ -711,6 +779,7 @@ def main(argv=None) -> int:
     issues = preflight(paths, bool(args.extract), not args.skip_physical, args.connection)
     issues += missing_app_source(plan)
     issues += check_order(plan)
+    issues += missing_cli_for_deploy(plan)
     if issues:
         print("PREFLIGHT FAILED")
         for i in issues:

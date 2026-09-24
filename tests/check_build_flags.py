@@ -163,9 +163,87 @@ def test_skill_dir_defaults_to_this_repo():
     print("  --skill-dir defaults to this repo and rejects a dir with no modules/")
 
 
+def test_the_deploy_cli_is_a_preflight_check_not_a_phase_failure() -> None:
+    """A missing App Runtime CLI must stop the build before it creates anything.
+
+    The App Runtime commands only exist from CLI 3.15, and the deploy phases run
+    last. So on a 3.14 machine the old behaviour built the entire backend -- forty
+    minutes of it -- and only then failed on a prerequisite that was true or false
+    at second zero and that nothing the build does can change. That makes it a
+    precondition, and preconditions belong in the preflight.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    try:
+        import build as B
+    finally:
+        sys.path.pop(0)
+
+    real = B.find_snow_cli
+    try:
+        B.find_snow_cli = lambda: ("", "")          # simulate a 3.14-only machine
+        expect_complaint = {"all": True, "streamlit": True, "react": True, "none": False}
+        for mode, should in expect_complaint.items():
+            plan = B.resolve({4}, False, False, deploy=mode)
+            got = bool(B.missing_cli_for_deploy(plan))
+            assert got is should, (
+                "--deploy %s: expected complaint=%s, got %s" % (mode, should, got))
+        # The message has to name the fix, or it is just a refusal.
+        msg = B.missing_cli_for_deploy(B.resolve({4}, False, False, deploy="all"))[0]
+        for needed in ("3.15", "pip install -U snowflake-cli", "--deploy none"):
+            assert needed in msg, "the message never mentions %r" % needed
+
+        B.find_snow_cli = lambda: ("/somewhere/snow", "Snowflake CLI version: 3.28.0")
+        assert not B.missing_cli_for_deploy(B.resolve({4}, False, False, deploy="all")), \
+            "a machine with a 3.15+ CLI was still refused"
+    finally:
+        B.find_snow_cli = real
+
+    # And it must actually be wired into the preflight, not merely defined.
+    src = open(os.path.join(ROOT, "pipeline", "build.py"), encoding="utf-8").read()
+    assert "issues += missing_cli_for_deploy(plan)" in src, \
+        "missing_cli_for_deploy is never called from the preflight"
+    print("  a deploy-capable CLI is a preflight precondition, with the fix named")
+
+
+def test_the_build_says_which_snow_it_will_use() -> None:
+    """An old `snow --version` is not on its own a reason to upgrade.
+
+    A machine commonly has two: a conda one first on PATH and a newer pip one
+    elsewhere. find_snow_cli() searches past the first, so `snow --version` can
+    report 3.14 while the build happily uses 3.28. Reporting only the version would
+    leave that trap intact, so the report names the binary too, and says explicitly
+    when the one on PATH is not the one being used.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    try:
+        import build as B
+    finally:
+        sys.path.pop(0)
+
+    real = B.find_snow_cli
+    try:
+        B.find_snow_cli = lambda: ("/opt/new/snow", "Snowflake CLI version: 3.28.0")
+        report = B.deploy_cli_report(B.resolve({4}, False, False, deploy="all"))
+        assert "3.28.0" in report, "the version is not reported"
+        assert "/opt/new/snow" in report, \
+            "the report names no binary, so a PATH mismatch stays invisible"
+        # Silent when nothing is being deployed.
+        assert B.deploy_cli_report(B.resolve({4}, False, False, deploy="none")) == "", \
+            "a backend-only build should not talk about the deploy CLI"
+    finally:
+        B.find_snow_cli = real
+
+    src = open(os.path.join(ROOT, "pipeline", "build.py"), encoding="utf-8").read()
+    assert "cli_report = deploy_cli_report(plan)" in src, \
+        "deploy_cli_report is never printed"
+    print("  the build names the snow binary it will use, not just a version")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
     test_missing_app_source_is_caught_in_preflight()
     test_skip_deploy_alias_matches_deploy_none()
     test_local_dashboards_keep_what_they_read()
+    test_the_deploy_cli_is_a_preflight_check_not_a_phase_failure()
+    test_the_build_says_which_snow_it_will_use()

@@ -16,6 +16,35 @@ possible until it is supplied again.
 
 Once you have it, put it somewhere permanent, not `/tmp`. That is how the first copy was lost.
 
+## Prerequisite that blocks only the deploy phases
+
+**Deploying an app needs a `snow` CLI of 3.15 or later.** The App Runtime commands
+(`snow app setup`, `snow app deploy`) do not exist before that; on an older CLI they fail with
+"No such command", which reads as a broken install rather than an old one. Everything else --
+the knowledge base, the physical layer, the semantic view, the catalog, the agent -- works on
+any recent CLI. Only `--deploy streamlit`, `--deploy react` and `--deploy all` need 3.15+.
+
+The build checks this in the preflight, before it creates anything, so a machine that cannot
+deploy is told at second zero rather than after forty minutes of backend work.
+
+**Check the version the build will actually use, not the one on your PATH.** These are commonly
+different, and that difference has wasted real time:
+
+```
+snow --version                      # what is first on PATH -- can be an old conda one
+python3 pipeline/build.py --dry-run --paths 4 --deploy all | grep -i 'app runtime'
+```
+
+A machine with both a conda `snow` and a pip one will usually put conda first. `snow --version`
+then reports the old one while a perfectly good 3.15+ sits elsewhere, and `find_snow_cli()`
+searches for and uses the newer one regardless. So an old number from `snow --version` is **not**
+on its own a reason to upgrade — check what the build reports before installing anything. If you
+do need one:
+
+```
+pip install -U snowflake-cli
+```
+
 ## The day before
 
 ### 1. Rehearse a full cold run, twice
