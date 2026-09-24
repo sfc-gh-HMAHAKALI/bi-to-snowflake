@@ -172,8 +172,9 @@ def add_arguments(ap: argparse.ArgumentParser) -> None:
                    help="Schema holding the knowledge base "
                         "(default: %(default)s)")
     g.add_argument("--analytics-schema", default=DEFAULT.analytics_schema,
-                   help="Schema for the governed views and agent "
-                        "(default: %(default)s)")
+                   help="Schema for the governed views and agent. Currently fixed "
+                        "at %(default)s: the DDL hardcodes the schema names, so a "
+                        "different value is rejected rather than half-applied")
     g.add_argument("--prefix", default=DEFAULT.prefix,
                    help="Prefix namespacing every object this build creates, so "
                         "two models can share an account (default: %(default)s)")
@@ -208,6 +209,23 @@ def from_args(args: argparse.Namespace) -> Naming:
             values[key] = given
 
     values["source_schemas"] = tuple(values["source_schemas"])
+
+    # The schema names are deliberately not templated into the SQL (see the module
+    # docstring), so {{ANALYTICS_SCHEMA}} appears zero times in pipeline/sql/ and
+    # the DDL creates its objects in a hardcoded ANALYTICS. Four Python consumers
+    # -- build.py's stage path, kb_to_inventory, path3's target schema and
+    # verify_deployment -- do follow this value. Honouring it here while the DDL
+    # ignores it is a split brain: the views get created in ANALYTICS and the
+    # verifier looks somewhere else. Reject it instead of half-applying it.
+    if values["analytics_schema"] != DEFAULT.analytics_schema:
+        raise SystemExit(
+            "--analytics-schema is not supported: the DDL in pipeline/sql/ hardcodes "
+            "the schema names, so only %r works. Passing %r would create objects in "
+            "%s while the verifier, the agent and the app inventory looked in %r. "
+            "Change the database with --database instead."
+            % (DEFAULT.analytics_schema, values["analytics_schema"],
+               DEFAULT.analytics_schema, values["analytics_schema"])
+        )
     return Naming(**values)
 
 

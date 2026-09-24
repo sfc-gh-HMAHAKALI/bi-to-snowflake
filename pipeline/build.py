@@ -27,6 +27,7 @@ import argparse
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -99,6 +100,21 @@ PHYSICAL: list[Phase] = [
     Phase("backlog", "Open backlog rows", "sql", "sql/14_open_backlog.sql"),
 ]
 
+def _count_views(sql_file: str) -> int:
+    """How many views a DDL file creates. Counted, not remembered.
+
+    The note on this phase said "7 RPT_ views" while the DDL created 8 -- the
+    views grew late and the string did not follow. A wrong count in a phase
+    description is not cosmetic: it makes a reader stop mid-build and check
+    whether a view failed, which is exactly what happened.
+    """
+    try:
+        with open(os.path.join(HERE, sql_file), encoding="utf-8") as fh:
+            return len(re.findall(r"CREATE\s+OR\s+REPLACE\s+VIEW", fh.read(), re.I))
+    except OSError:
+        return 0
+
+
 PATH_PHASES: list[Phase] = [
     # Path 1 -- no semantic view, no agent.
     Phase("p1-tags", "Tag taxonomy", "sql", "sql/20_tag_taxonomy.sql", paths=(1,)),
@@ -130,7 +146,8 @@ PATH_PHASES: list[Phase] = [
     # uses -- can speak.
     Phase("p2-views", "Reporting views over the semantic view", "sql",
           "sql/45_reporting_views.sql", paths=(2, 4),
-          note="7 RPT_ views, so plain-SQL clients read the governed definitions",
+          note="%d RPT_ views, so plain-SQL clients read the governed definitions"
+               % _count_views("sql/45_reporting_views.sql"),
           depends_on=("p3-ossie",)),
 
     # Paths 2 and 4 are the same surfaces: a report with the agent embedded in it. A
@@ -479,7 +496,12 @@ STREAMLIT_SOURCE = [
     "bim_ui/__init__.py", "bim_ui/compat.py", "bim_ui/filters.py",
     ".streamlit/config.toml",
 ]
-REACT_SOURCE = ["app.yml", "package.json"]
+# lib/queries.ts is listed because verify_deployment.py enforces a specific shape
+# inside it (each dataset carrying a `sql:` template literal). Without it in this
+# list the preflight passed and the failure arrived after the build, from the
+# verifier, as a message that read like a pass. assets/react_ui/queries.template.ts
+# is the shape to copy.
+REACT_SOURCE = ["app.yml", "package.json", "lib/queries.ts"]
 
 
 def missing_app_source(plan: list[Phase]) -> list[str]:
@@ -513,6 +535,45 @@ def missing_app_source(plan: list[Phase]) -> list[str]:
                 "or --deploy none."
                 % ", ".join(gone))
     return problems
+
+
+def app_source_status(paths: set[int]) -> list[str]:
+    """Informational notes on whether app source exists, in EVERY deploy mode.
+
+    ``missing_app_source`` only fires when a deploy phase is in the plan, so
+    ``--deploy none`` -- the documented "run both dashboards locally" choice --
+    skipped the check entirely. A build then printed "18/18 phases ok" with no
+    app source anywhere, and the first sign of trouble was
+    ``streamlit run pipeline/app_streamlit/app.py`` failing with a plain "no such
+    file". The guidance to check by hand was already in the wizard; this makes the
+    build say it.
+
+    Information, not failure: on a backend-only build an absent app is the correct
+    outcome, and returning an error would make the honest case look broken.
+    """
+    effective = expand(paths)
+    if not (effective & {2, 4}):
+        return []
+    notes: list[str] = []
+    for label, folder, required in (
+        ("Streamlit", "app_streamlit", STREAMLIT_SOURCE),
+        ("React", "app_react", REACT_SOURCE),
+    ):
+        d = os.path.join(HERE, folder)
+        gone = [f for f in required if not os.path.exists(os.path.join(d, f))]
+        if not gone:
+            notes.append("%s app source present in pipeline/%s/" % (label, folder))
+        elif len(gone) == len(required):
+            notes.append(
+                "%s app source NOT composed (pipeline/%s/ is empty or absent). "
+                "The backend is complete; the dashboard is not. Compose it against "
+                "assets/%s/ per references/composition-rules.md."
+                % (label, folder, "streamlit_ui" if label == "Streamlit" else "react_ui"))
+        else:
+            notes.append(
+                "%s app source INCOMPLETE in pipeline/%s/: missing %s"
+                % (label, folder, ", ".join(gone)))
+    return notes
 
 
 def preflight(paths: set[int], with_extract: bool, with_physical: bool,
@@ -676,10 +737,21 @@ def main(argv=None) -> int:
     for r in results:
         print(f"  {'ok ' if r['ok'] else 'ERR'}  {r['seconds']:6.1f}s  {r['title']}")
 
+    # Every deploy mode, including none. "18/18 phases ok" reads as finished, and
+    # on a local-dashboards build it is only the backend that is finished.
+    notes = app_source_status(paths)
+    if notes:
+        print()
+        for n in notes:
+            print("  app source: %s" % n)
+
     os.makedirs(os.path.join(HERE, "out"), exist_ok=True)
-    with open(os.path.join(HERE, "out", "build_timings.json"), "w", encoding="utf-8") as f:
+    timings_path = os.path.join(HERE, "out", "build_timings.json")
+    with open(timings_path, "w", encoding="utf-8") as f:
         json.dump({"total_seconds": round(total, 1), "phases": results}, f, indent=2)
-    print("\nwrote out/build_timings.json")
+    # The path as written, relative to the repo root rather than to pipeline/.
+    # "wrote out/build_timings.json" sent a reader looking in the wrong directory.
+    print("\nwrote %s" % os.path.relpath(timings_path, SKILL_ROOT))
 
     return 0 if all(r["ok"] for r in results) else 1
 

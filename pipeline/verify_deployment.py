@@ -214,10 +214,16 @@ if not queries_ts.exists():
         skipped.append("React query scope scan (no app_react/ composed)")
 else:
     src = queries_ts.read_text()
-    # Only the SQL template literals, not the surrounding prose. The comments in that file
-    # discuss the KB database by name precisely because reading it from the app was the bug, so
-    # scanning the whole file would flag its own explanation.
-    sql_blocks = re.findall(r"sql:\s*`(.*?)`", src, re.S)
+    # Strip comments before scanning, then read the SQL template literals.
+    #
+    # The previous version claimed to read "only the SQL template literals, not
+    # the surrounding prose" and did not: it matched `sql:` inside its own
+    # file-header comment explaining the requirement, and reported 9 datasets for
+    # 8 real ones. The comment's stated rationale -- that scanning prose would
+    # flag its own explanation -- is exactly what happened.
+    no_comments = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    no_comments = re.sub(r"^\s*//.*$", "", no_comments, flags=re.M)
+    sql_blocks = re.findall(r"sql:\s*`(.*?)`", no_comments, re.S)
     joined = "\n".join(sql_blocks)
     # Database-qualified references of the form DB.SCHEMA.OBJECT. The ${DB}.${SCHEMA}
     # template form is the target analytics schema by construction and does not match.
@@ -225,10 +231,20 @@ else:
                           joined))
     outside = sorted(f"{d}.{s}" for d, s in refs
                      if (d, s) != (DB, naming.analytics_schema))
-    checks.append(("React reads only ANALYTICS",
-                   f"{len(sql_blocks)} datasets, all inside the target analytics schema"
-                   if not outside
-                   else f"reads outside the granted schema: {', '.join(outside)}",
+    # The count leads. This check has two distinct failure modes -- "found no
+    # datasets" and "found datasets reading out of schema" -- and the old message
+    # rendered the first as "0 datasets, all inside the target analytics schema",
+    # which reads like a pass. It cost six minutes to work out it was failing.
+    if not sql_blocks:
+        detail = ("no datasets found -- expected each dataset in lib/queries.ts to "
+                  "carry a `sql:` property holding a template literal. See "
+                  "assets/react_ui/queries.template.ts for the required shape.")
+    elif outside:
+        detail = (f"{len(sql_blocks)} datasets, but these read outside the granted "
+                  f"schema: {', '.join(outside)}")
+    else:
+        detail = f"{len(sql_blocks)} datasets, all inside the target analytics schema"
+    checks.append(("React reads only ANALYTICS", detail,
                    bool(sql_blocks) and not outside))
 
 conn.close()
