@@ -66,6 +66,38 @@ def test_missing_app_source_is_caught_in_preflight():
     print("  composed-app preflight fires per surface, and not for --deploy none")
 
 
+
+
+def test_skip_deploy_alias_matches_deploy_none():
+    """--skip-deploy is the name people guess first; it must not be an error."""
+    a = build(["--paths", "4", "--skip-deploy", "--dry-run"])
+    b = build(["--paths", "4", "--deploy", "none", "--dry-run"])
+    assert a.returncode == 0, "--skip-deploy rejected:\n%s" % a.stderr
+    assert phase_lines(a.stdout) == phase_lines(b.stdout), \
+        "--skip-deploy and --deploy none planned differently"
+    print("  --skip-deploy is accepted and matches --deploy none")
+
+
+def test_local_dashboards_keep_what_they_read():
+    """--deploy none must keep the bridge and the RPT_ views; --paths 3 drops both.
+
+    That is why --paths 3 is the wrong way to avoid the deploys: the apps would
+    come up with nothing to read.
+    """
+    none4 = build(["--paths", "4", "--deploy", "none", "--dry-run"]).stdout
+    assert "app inventory" in none4, "--deploy none dropped the app inventory bridge"
+    assert "Reporting views" in none4, "--deploy none dropped the RPT_ views"
+    for frag in ("Deploy the Streamlit", "Deploy the React"):
+        assert frag not in none4, "%s survived --deploy none" % frag
+
+    p3 = build(["--paths", "3", "--dry-run"]).stdout
+    assert "app inventory" not in p3 and "Reporting views" not in p3, \
+        "--paths 3 now includes app phases; the documented trap is stale"
+    print("  --deploy none keeps the bridge and RPT_ views that --paths 3 drops")
+
+
 if __name__ == "__main__":
     test_dry_run_phase_counts()
     test_missing_app_source_is_caught_in_preflight()
+    test_skip_deploy_alias_matches_deploy_none()
+    test_local_dashboards_keep_what_they_read()

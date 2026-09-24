@@ -129,12 +129,20 @@ cannot see the report's filter state is a different product. Path 4 builds them 
 | Both deployed to Snowflake | `--deploy all` | Streamlit + React App Runtime service | None needed |
 | Both local / Nothing deployed | `--deploy none` (or `local`) | Backend only (views, semantic view, agent) | Streamlit (`streamlit run pipeline/app_streamlit/app.py`) and React (`cd pipeline/app_react && npm run dev`) |
 
-If omitted, `--deploy` defaults to `all`.
+If omitted, `--deploy` defaults to `all`. `--skip-deploy` is accepted as an alias for
+`--deploy none`.
 
-`--deploy none` still builds everything on Snowflake that a dashboard reads -- the
-physical tables, semantic view, agent, SQL bridge and `RPT_` views. Only the two app
-surfaces are skipped, so a local dashboard queries the same governed objects a
-deployed one would.
+**Local hosting is not local data.** `--deploy` only decides where the two apps are
+*hosted*. The semantic view, row access policy, Cortex Search, the agent, the SQL
+bridge and the `RPT_` views are Snowflake objects either way, and a dashboard on
+localhost queries them over a connection. Say this plainly if a user asks for
+"local instead of Snowflake": the apps can run anywhere, the governed layer cannot.
+
+**Do not reach for `--paths 3` to get local dashboards.** It looks like it avoids the
+deploy phases, and it does, but it also drops the app inventory bridge and the seven
+`RPT_` views -- the two things a dashboard actually reads. The apps would come up
+empty. `--paths 4 --deploy none` is the correct combination: every phase a dashboard
+depends on, and neither app surface.
 
 ### Where the composed app has to live
 

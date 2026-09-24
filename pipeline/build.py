@@ -519,6 +519,11 @@ def main(argv=None) -> int:
                     help="Which dashboards to deploy to Snowflake: 'all'/'both' (default), "
                          "'streamlit' (deploy Streamlit, React local), 'react', "
                          "or 'none'/'local' (build backend on Snowflake, run dashboards locally)")
+    # Accepted because it is the name anyone looks for first. Without it the
+    # obvious guess is an argparse error, which reads as "the pipeline cannot do
+    # this" rather than "that flag is spelled differently".
+    ap.add_argument("--skip-deploy", action="store_true",
+                    help="Alias for --deploy none")
     ap.add_argument("--skip-physical", action="store_true",
                     help="Leave the demo data layer alone")
     ap.add_argument("--connection", default="my-demo-account")
@@ -533,6 +538,9 @@ def main(argv=None) -> int:
     # process sees one set of names.
     global NAMING
     NAMING = config.from_args(args)
+
+    if args.skip_deploy:
+        args.deploy = "none"
 
     paths = ({1, 2, 3, 4} if args.all
              else {int(p) for p in args.paths.split(",") if p.strip().isdigit()})
