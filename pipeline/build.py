@@ -422,6 +422,47 @@ def kb_row_count(connection: str) -> int:
         return -1
 
 
+STREAMLIT_SOURCE = [
+    "app.py", "data.py", "pages_impl.py", "metrics.py", "pyproject.toml",
+    "bim_ui/__init__.py", "bim_ui/compat.py", "bim_ui/filters.py",
+    ".streamlit/config.toml",
+]
+REACT_SOURCE = ["app.yml", "package.json"]
+
+
+def missing_app_source(plan: list[Phase]) -> list[str]:
+    """Which composed app files a planned deploy phase would not find.
+
+    The app source is not in this repo. It is composed per model against the
+    locked libraries in assets/, written to pipeline/app_streamlit and
+    pipeline/app_react. Checking here turns "phase 15 of 17 failed" into one
+    message before anything is created.
+    """
+    problems: list[str] = []
+    keys = {p.key for p in plan}
+    if "p24-streamlit" in keys:
+        d = os.path.join(HERE, "app_streamlit")
+        gone = [f for f in STREAMLIT_SOURCE if not os.path.exists(os.path.join(d, f))]
+        if gone:
+            problems.append(
+                "Streamlit app source is not composed yet. Missing in "
+                "pipeline/app_streamlit/: %s. Compose the pages against "
+                "assets/streamlit_ui/ per references/composition-rules.md, or "
+                "pass --deploy none to build the backend only."
+                % ", ".join(gone))
+    if "p24-react" in keys:
+        d = os.path.join(HERE, "app_react")
+        gone = [f for f in REACT_SOURCE if not os.path.exists(os.path.join(d, f))]
+        if gone:
+            problems.append(
+                "React app source is not composed yet. Missing in "
+                "pipeline/app_react/: %s. Compose against assets/react_ui/ per "
+                "references/composition-rules.md, or pass --deploy streamlit "
+                "or --deploy none."
+                % ", ".join(gone))
+    return problems
+
+
 def preflight(paths: set[int], with_extract: bool, with_physical: bool,
               connection: str) -> list[str]:
     """Refuse to run a plan whose outputs would be built from an empty input.
@@ -518,6 +559,7 @@ def main(argv=None) -> int:
         return 0
 
     issues = preflight(paths, bool(args.extract), not args.skip_physical, args.connection)
+    issues += missing_app_source(plan)
     if issues:
         print("PREFLIGHT FAILED")
         for i in issues:

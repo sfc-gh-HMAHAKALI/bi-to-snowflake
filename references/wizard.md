@@ -125,11 +125,29 @@ cannot see the report's filter state is a different product. Path 4 builds them 
 
 | Deploy selection | `--deploy` flag | What deploys to Snowflake | What runs locally |
 |---|---|---|---|
-| Streamlit deployed, React on localhost | `--deploy streamlit` | Streamlit report (container runtime) | React dashboard (`cd app_react && npm run dev`) |
+| Streamlit deployed, React on localhost | `--deploy streamlit` | Streamlit report (container runtime) | React (`cd pipeline/app_react && npm install && npm run dev`) |
 | Both deployed to Snowflake | `--deploy all` | Streamlit + React App Runtime service | None needed |
-| Both local / Nothing deployed | `--deploy none` (or `local`) | Backend only (views, semantic view, agent) | Streamlit (`streamlit run app_streamlit/app.py`) + React (`npm run dev`) |
+| Both local / Nothing deployed | `--deploy none` (or `local`) | Backend only (views, semantic view, agent) | Streamlit (`streamlit run pipeline/app_streamlit/app.py`) and React (`cd pipeline/app_react && npm run dev`) |
 
 If omitted, `--deploy` defaults to `all`.
+
+`--deploy none` still builds everything on Snowflake that a dashboard reads -- the
+physical tables, semantic view, agent, SQL bridge and `RPT_` views. Only the two app
+surfaces are skipped, so a local dashboard queries the same governed objects a
+deployed one would.
+
+### Where the composed app has to live
+
+The app source is not in this repo: it is composed per model against the locked
+libraries. Write it to the paths the deploy phases read, or they will not find it:
+
+| Surface | Compose into | Must contain |
+|---|---|---|
+| Streamlit | `pipeline/app_streamlit/` | `app.py`, `data.py`, `pages_impl.py`, `metrics.py`, `pyproject.toml`, `bim_ui/{__init__,compat,filters}.py`, `.streamlit/config.toml` |
+| React | `pipeline/app_react/` | `app.yml`, `package.json`, plus the Next.js tree |
+
+`build.py` preflights this list whenever a deploy phase is in the plan, so a missing
+file is one message before anything is created rather than a failure at phase 15.
 
 ## The confirmation gate
 

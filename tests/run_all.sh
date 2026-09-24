@@ -30,7 +30,7 @@ python3 tests/check_placeholders.py || fail=1
 echo "== no customer identifiers =="
 python3 tests/check_identifiers.py || fail=1
 
-echo "== build dry-run resolves paths and deploy flags =="
+echo "== build resolves deploy flags and preflights the composed app =="
 python3 tests/check_build_flags.py || fail=1
 
 echo "== teardown plans a dry run and refuses to act without --execute =="
