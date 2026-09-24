@@ -99,8 +99,8 @@ ask_user_question:
         description: "Fastest. React renders identically and starts in seconds. Recommended for a live walkthrough."
       - label: "Both deployed to Snowflake"
         description: "Full SPCS deploy. Adds roughly 95 seconds and a Docker build."
-      - label: "Nothing deployed"
-        description: "Generate and verify the code only."
+      - label: "Both local / Nothing deployed"
+        description: "Generate and verify the code; run dashboards locally against Snowflake."
 ```
 
 Only ask the deploy question if a dashboard was selected.
@@ -119,7 +119,17 @@ path 4 pulls in 2 and 3 -- so pass what the user asked for and let `expand()` do
 | A dashboard **and** an agent | `--paths 4` |
 
 A dashboard plus an agent is path 4 rather than `2,3` because an embedded chat panel that
-cannot see the report's filter state is a different product. Path 4 deploys them together.
+cannot see the report's filter state is a different product. Path 4 builds them together.
+
+### Deploy mapping
+
+| Deploy selection | `--deploy` flag | What deploys to Snowflake | What runs locally |
+|---|---|---|---|
+| Streamlit deployed, React on localhost | `--deploy streamlit` | Streamlit report (container runtime) | React dashboard (`cd app_react && npm run dev`) |
+| Both deployed to Snowflake | `--deploy all` | Streamlit + React App Runtime service | None needed |
+| Both local / Nothing deployed | `--deploy none` (or `local`) | Backend only (views, semantic view, agent) | Streamlit (`streamlit run app_streamlit/app.py`) + React (`npm run dev`) |
+
+If omitted, `--deploy` defaults to `all`.
 
 ## The confirmation gate
 
@@ -141,7 +151,7 @@ Proceed?
 Get the plan and the phase count from the build itself rather than estimating:
 
 ```bash
-python3 pipeline/build.py --paths <p> --dry-run
+python3 pipeline/build.py --paths <p> [--deploy <mode>] --dry-run
 ```
 
 Timing to quote, measured on the reference model: the knowledge base, views, bridge and
@@ -153,7 +163,7 @@ layers cached, it is considerably less.
 ## Running it
 
 ```bash
-python3 pipeline/build.py --paths <p> \
+python3 pipeline/build.py --paths <p> [--deploy <mode>] \
   --extract "<path>" --connection <name> --inventory /tmp/b2s/inventory.json
 ```
 

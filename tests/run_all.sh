@@ -30,6 +30,9 @@ python3 tests/check_placeholders.py || fail=1
 echo "== no customer identifiers =="
 python3 tests/check_identifiers.py || fail=1
 
+echo "== build dry-run resolves paths and deploy flags =="
+python3 tests/check_build_flags.py || fail=1
+
 echo "== teardown plans a dry run and refuses to act without --execute =="
 if python3 pipeline/teardown.py --database T --kb-database K \
      --connection __none__ 2>/dev/null | grep -q "statements planned"; then

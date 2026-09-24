@@ -158,7 +158,8 @@ def expand(paths: set[int]) -> set[int]:
     return effective
 
 
-def resolve(paths: set[int], with_extract: bool, with_physical: bool) -> list[Phase]:
+def resolve(paths: set[int], with_extract: bool, with_physical: bool,
+            deploy: str = "all") -> list[Phase]:
     """Order phases by dependency and drop anything unrequested."""
     plan = list(FOUNDATION)
     if with_extract:
@@ -171,7 +172,17 @@ def resolve(paths: set[int], with_extract: bool, with_physical: bool) -> list[Ph
     # for a catalog-only build would be work nobody asked for.
     if effective & set(FOUNDATION_BRIDGE.paths):
         plan.append(FOUNDATION_BRIDGE)
-    plan += [p for p in PATH_PHASES if effective & set(p.paths)]
+
+    phases = [p for p in PATH_PHASES if effective & set(p.paths)]
+    deploy_norm = (deploy or "all").lower().strip()
+    if deploy_norm in ("none", "local", "skip"):
+        phases = [p for p in phases if p.key not in ("p24-streamlit", "p24-grants", "p24-react")]
+    elif deploy_norm == "streamlit":
+        phases = [p for p in phases if p.key not in ("p24-grants", "p24-react")]
+    elif deploy_norm == "react":
+        phases = [p for p in phases if p.key != "p24-streamlit"]
+
+    plan += phases
     return plan
 
 
@@ -461,6 +472,12 @@ def main(argv=None) -> int:
                     help="Comma-separated: 1=catalog 2=BI 3=semantic view+agent 4=embedded AI")
     ap.add_argument("--all", action="store_true",
                     help="All four paths")
+    ap.add_argument("--deploy",
+                    choices=["all", "both", "streamlit", "react", "none", "local", "skip"],
+                    default="all",
+                    help="Which dashboards to deploy to Snowflake: 'all'/'both' (default), "
+                         "'streamlit' (deploy Streamlit, React local), 'react', "
+                         "or 'none'/'local' (build backend on Snowflake, run dashboards locally)")
     ap.add_argument("--skip-physical", action="store_true",
                     help="Leave the demo data layer alone")
     ap.add_argument("--connection", default="my-demo-account")
@@ -480,7 +497,8 @@ def main(argv=None) -> int:
              else {int(p) for p in args.paths.split(",") if p.strip().isdigit()})
 
     plan = resolve(paths, with_extract=bool(args.extract),
-                   with_physical=not args.skip_physical)
+                   with_physical=not args.skip_physical,
+                   deploy=args.deploy)
 
     print("=" * 74)
     print("BUILD PLAN")

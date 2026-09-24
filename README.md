@@ -20,8 +20,8 @@ python3 -m modules.cli parse --type cognos /path/to/model.xml -o /tmp/inventory.
 # 2. See the plan without touching anything
 python3 pipeline/build.py --paths 4 --dry-run
 
-# 3. Build
-python3 pipeline/build.py --paths 4 \
+# 3. Build (choose --deploy all, streamlit, or none for local dev)
+python3 pipeline/build.py --paths 4 --deploy streamlit \
   --extract /path/to/model.xml --connection <name>
 ```
 

@@ -29,8 +29,8 @@ python3 pipeline/teardown.py --database $DB --kb-database $KB_DB \
 python3 pipeline/teardown.py --database $DB --kb-database $KB_DB \
   --connection my-demo-account --execute
 
-# Cold build
-time python3 pipeline/build.py --paths 4 \
+# Cold build (--deploy streamlit deploys Streamlit and leaves React on localhost for live walkthrough)
+time python3 pipeline/build.py --paths 4 --deploy streamlit \
   --extract /path/to/model.xml --connection my-demo-account
 
 # Second run, to prove idempotency: same command, should converge not duplicate
@@ -93,7 +93,7 @@ Show `--dry-run` first. It prints the plan and changes nothing, which makes the 
 this is a defined pipeline rather than improvisation:
 
 ```bash
-python3 pipeline/build.py --paths 4 --dry-run
+python3 pipeline/build.py --paths 4 --deploy streamlit --dry-run
 ```
 
 18 phases for that selection. Then run it for real and switch to the HTML.
