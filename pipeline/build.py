@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 import config
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# The repo root: modules/ is vendored here, beside pipeline/.
+SKILL_ROOT = os.path.dirname(HERE)
 
 # Set once in main() from the naming flags. The DDL carries {{NAME}}
 # placeholders that render_sql substitutes against this, so a build can target
@@ -383,6 +385,12 @@ def run_extract(model: str, inventory: str, skill_dir: str) -> tuple[bool, str]:
     normalised form, and normalising 19,051 filters at load time would put
     tool-specific logic inside the loader.
     """
+    probe = os.path.join(skill_dir, "modules", "cognos", "parser.py")
+    if not os.path.isfile(probe):
+        return False, ("--skill-dir has no modules/cognos/parser.py: %s\n"
+                       "Extraction runs `python -m modules.cli` from that "
+                       "directory, so it must hold the modules/ tree. Omit the "
+                       "flag to use this repo (%s)." % (skill_dir, SKILL_ROOT))
     os.makedirs(os.path.dirname(inventory) or ".", exist_ok=True)
     proc = subprocess.run(
         [sys.executable, "-m", "modules.cli", "parse", "--type", "cognos", model,
@@ -528,8 +536,12 @@ def main(argv=None) -> int:
                     help="Leave the demo data layer alone")
     ap.add_argument("--connection", default="my-demo-account")
     ap.add_argument("--inventory", default="/tmp/b2s/cognos_inventory.json")
-    ap.add_argument("--skill-dir",
-                    default=os.path.expanduser("~/.snowflake/cortex/skills/semantic-extraction"))
+    # Defaults to this repo. The modules/ tree is vendored here (see VENDOR.md),
+    # so extraction must run against it: pointing at a sibling skill silently
+    # ran a different, independently-updated copy of the parser.
+    ap.add_argument("--skill-dir", default=SKILL_ROOT,
+                    help="Directory holding the modules/ tree to extract with "
+                         "(default: this repo)")
     ap.add_argument("--dry-run", action="store_true", help="Print the plan and stop")
     config.add_arguments(ap)
     args = ap.parse_args(argv)

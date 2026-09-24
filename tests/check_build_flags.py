@@ -96,7 +96,38 @@ def test_local_dashboards_keep_what_they_read():
     print("  --deploy none keeps the bridge and RPT_ views that --paths 3 drops")
 
 
+
+
+def test_skill_dir_defaults_to_this_repo():
+    """Extraction must run the vendored modules/, not a sibling skill's copy.
+
+    The default pointed at ~/.snowflake/cortex/skills/semantic-extraction, so
+    `python -m modules.cli` loaded that skill's parser. It worked wherever the
+    sibling happened to be installed and current, and diverged everywhere else --
+    including silently missing archive support the vendored parser has.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    import build as B
+
+    assert B.SKILL_ROOT == ROOT, \
+        "SKILL_ROOT is %s, expected the repo root %s" % (B.SKILL_ROOT, ROOT)
+    assert os.path.isfile(os.path.join(B.SKILL_ROOT, "modules", "cognos", "parser.py")), \
+        "the resolved skill dir has no vendored parser"
+
+    src = open(os.path.join(ROOT, "pipeline", "build.py")).read()
+    assert "skills/semantic-extraction" not in src, \
+        "build.py still hardcodes a sibling skill path"
+
+    # The guard must reject a directory with no modules/ tree rather than
+    # failing later inside a subprocess.
+    ok, msg = B.run_extract("ignored.xml", "/tmp/b2s_probe/inv.json", "/tmp")
+    assert ok is False and "modules/cognos/parser.py" in msg, \
+        "run_extract did not reject a skill dir without modules/: %r" % msg
+    print("  --skill-dir defaults to this repo and rejects a dir with no modules/")
+
+
 if __name__ == "__main__":
+    test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
     test_missing_app_source_is_caught_in_preflight()
     test_skip_deploy_alias_matches_deploy_none()
