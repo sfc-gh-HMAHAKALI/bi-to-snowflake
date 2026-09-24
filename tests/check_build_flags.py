@@ -239,6 +239,121 @@ def test_the_build_says_which_snow_it_will_use() -> None:
     print("  the build names the snow binary it will use, not just a version")
 
 
+def test_the_model_digest_runs_between_the_parse_and_the_load() -> None:
+    """The description must land in the gap it exists to fill.
+
+    The parse takes about two seconds and the knowledge base load about two minutes.
+    So a digest of the model is only useful if it is written after the parse -- when
+    the facts exist -- and before the load, when the user is about to have nothing to
+    do. Written after the load it is a report nobody was waiting for.
+
+    It must also stream, because the message that matters is the file path; captured,
+    the user is handed a document and never told where it is.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    try:
+        import build as B
+    finally:
+        sys.path.pop(0)
+
+    plan = B.resolve({1, 2, 3, 4}, True, True, deploy="none")
+    keys = [p.key for p in plan]
+    assert "describe" in keys, "the model digest phase is not in a full plan"
+    assert keys.index("extract") < keys.index("describe") < keys.index("kb-load"), \
+        "digest must sit between the parse and the load, got: %s" % keys[:6]
+
+    desc = next(p for p in plan if p.key == "describe")
+    assert "extract" in desc.depends_on, \
+        "the digest reads the inventory but does not declare the dependency"
+    assert desc.stream, \
+        "the digest does not stream, so the path it prints is captured and lost"
+
+    # Nothing to describe without a parse.
+    assert "describe" not in [p.key for p in B.resolve({1, 2, 3, 4}, False, True, deploy="none")], \
+        "the digest runs even when no model was parsed"
+
+    # And it must actually be handed the inventory and the original filename. Read a
+    # window after the lookup rather than slicing to the first "]", which lands
+    # inside plan[desc_idx] and made an earlier version of this assertion misfire.
+    src = open(os.path.join(ROOT, "pipeline", "build.py"), encoding="utf-8").read()
+    block = src[src.index('desc_idx = next('):][:600]
+    for flag in ("--inventory", "--source"):
+        assert flag in block, "the digest phase is never passed %s" % flag
+    print("  the model digest runs between parse and load, streams, and gets its inputs")
+
+
+def test_the_digest_reports_only_what_the_parse_found() -> None:
+    """Every number in the digest must come from the inventory.
+
+    This document is read before anyone looks at the data, and it is used to decide
+    what to migrate. So an inflated count, a rounded-up total or a section invented
+    to look thorough would do real harm. Rendered from a deliberately small inventory
+    and checked for claims it has no basis for.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    try:
+        import describe_model as D
+    finally:
+        sys.path.pop(0)
+
+    tiny = {
+        "source_type": "cognos",
+        "tables": [{"name": "T1"}, {"name": "T2"}],
+        "dimensions": [{"name": "C%d" % i} for i in range(7)],
+        "metrics": [], "facts": [], "relationships": [], "hierarchies": [],
+        "grain_declarations": [], "filters": [], "security_rules": [],
+        "dashboards": [], "worksheets": [], "errors": [],
+        "complexity_summary": {"simple": 5, "needs_translation": 2, "manual_required": 1},
+        "flagged": [{"name": "X", "reason": "because", "expression": "1+1"}],
+        "source_analysis": {"model_name": "Tiny", "clones": {}, "data_sources": {},
+                            "security_summary": {}},
+    }
+    md = D.render(tiny, "/somewhere/Tiny.zip")
+
+    assert "Tiny" in md and "Tiny.zip" in md, "the model and source file are not named"
+    assert "| Tables and views | 2 |" in md, "table count wrong or missing"
+    assert "| Fields | 7 |" in md, "field count wrong or missing"
+    # Empty collections must be omitted, not rendered as zero.
+    for absent in ("| Measures | 0 |", "| Joins | 0 |", "| Security filters | 0 |"):
+        assert absent not in md, "an empty section was rendered as a zero: %s" % absent
+    # Sections with no data must not appear at all.
+    for heading in ("## Where the data already lives", "## What repeats",
+                    "## How access is controlled"):
+        assert heading not in md, "%s was rendered with no data behind it" % heading
+    # The complexity line must add up to what was given, not to a nicer number.
+    assert "Of 8 expressions" in md, "expression total is not the sum of the parse"
+    assert "**5 translate directly**" in md and "2 need translation" in md
+    # A Framework Manager model has no reports; say so rather than implying failure.
+    assert "## What is not in this file" in md, \
+        "a model with no dashboards should explain why, not stay silent"
+
+    # Now the opposite: with data present, the sections must appear.
+    rich = dict(tiny)
+    rich["source_analysis"] = {
+        "model_name": "Rich",
+        "clones": {"fiscal_year_object_families": {"FACT_BIG": ["FY22", "FY23", "FY24"],
+                                                   "AM": ["FY23"]},
+                   "fiscal_year_cloned_objects": 4, "calculation_total": 10,
+                   "calculation_clone_ratio": 2.0, "package_total": 5,
+                   "package_role_based": 4},
+        "data_sources": {"sources": [{"name": "S", "platform": "snowflake",
+                                      "query_subjects_using": 3}]},
+        "security_summary": {"filter_total": 100, "distinct_principals": 9,
+                             "distinct_shapes": 1,
+                             "shapes": [{"columns": ["ROLE"], "filter_count": 100}]},
+    }
+    md2 = D.render(rich, "/x/Rich.zip")
+    for heading in ("## Where the data already lives", "## What repeats",
+                    "## How access is controlled"):
+        assert heading in md2, "%s missing when the data is present" % heading
+    # The clone example must be the illustrative family, not the alphabetically first.
+    assert "`FACT_BIG`" in md2, \
+        "the clone example picked the alphabetically first family, which illustrates nothing"
+    assert "100" in md2 and "1 shapes" not in md2.replace("**1 shapes**", ""), \
+        "shape count rendering is wrong"
+    print("  the digest reports only parsed facts, and omits sections it has no data for")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -247,3 +362,5 @@ if __name__ == "__main__":
     test_local_dashboards_keep_what_they_read()
     test_the_deploy_cli_is_a_preflight_check_not_a_phase_failure()
     test_the_build_says_which_snow_it_will_use()
+    test_the_model_digest_runs_between_the_parse_and_the_load()
+    test_the_digest_reports_only_what_the_parse_found()

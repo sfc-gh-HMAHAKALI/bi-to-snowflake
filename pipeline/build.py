@@ -89,6 +89,13 @@ FOUNDATION: list[Phase] = [
 EXTRACT: list[Phase] = [
     Phase("extract", "Parse the BI model", "extract", "",
           note="Streaming parse; emits the unified inventory"),
+    # Between the parse and the load on purpose. The parse takes about two seconds
+    # and the load about two minutes, so this is the one point where everything
+    # interesting is already known and the user has nothing to do. Give them a
+    # readable description of their own model to fill the wait.
+    Phase("describe", "Describe the model for the user", "py", "describe_model.py",
+          depends_on=("extract",), stream=True,
+          note="Writes out/model-overview.md -- read it while the load runs"),
     Phase("kb-load", "Load the knowledge base", "py", "kb_loader.py",
           stream=True,
           note="MERGE on the source key, so a reload updates in place"),
@@ -815,6 +822,15 @@ def main(argv=None) -> int:
                         "--source-system", "cognos",
                         "--security-mapping",
                         os.path.join(os.path.dirname(args.inventory), "security_mapping.json"),
+                    ]
+                # And the digest needs the inventory plus the original filename,
+                # since the inventory does not record where it came from and
+                # "parsed from inv.json" means nothing to the person reading it.
+                desc_idx = next((j for j, q in enumerate(plan) if q.key == "describe"), None)
+                if desc_idx is not None:
+                    plan[desc_idx].args = [
+                        "--inventory", args.inventory,
+                        "--source", args.extract,
                     ]
         dt = time.time() - t0
         results.append({"phase": p.key, "title": p.title, "ok": ok, "seconds": round(dt, 1)})
