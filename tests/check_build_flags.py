@@ -536,6 +536,68 @@ def test_the_streamlit_layout_is_pinned_like_the_react_one() -> None:
     print("  the Streamlit layout is pinned, including the two metrics.py files")
 
 
+def test_the_deploy_question_and_its_mapping_use_the_same_labels() -> None:
+    """A valid answer must not be able to look invalid.
+
+    The wizard offered "Both local / Nothing deployed" while the mapping table named the
+    same choice differently, and the deploy answer had no row in the path table at all.
+    So selecting local produced "that's not one of the paths" followed by the agent doing
+    it anyway -- the user was told their answer was invalid AND it was not honoured as
+    stated. Two names for one choice is the mechanism; a missing row is the trigger.
+
+    Rather than assert exact strings, this reads the labels out of the wizard's Round 2
+    deploy block and requires every one of them to appear in the mapping table. They
+    cannot drift apart without failing.
+    """
+    doc = open(os.path.join(ROOT, "references", "wizard.md"), encoding="utf-8").read()
+
+    block = doc[doc.index('header: "Deploy"'):]
+    block = block[:block.index("```")]
+    labels = re.findall(r'- label: "([^"]+)"', block)
+    assert len(labels) == 3, "expected three deploy options, found %d: %s" % (len(labels), labels)
+
+    mapping = doc[doc.index("### Deploy mapping"):]
+    mapping = mapping[:mapping.index("\n**") if "\n**" in mapping else len(mapping)]
+    for label in labels:
+        assert label in mapping, (
+            "the wizard offers %r but the deploy mapping table never names it, so the "
+            "answer cannot be resolved" % label)
+
+    # The default must be the local option, matching --deploy's argparse default.
+    assert 'defaultAnswer: "Run both locally"' in doc, \
+        "the deploy question does not pre-select the local default"
+    local = [l for l in labels if "local" in l.lower()]
+    assert local, "no deploy option mentions running locally"
+    assert "**(default)**" in mapping, "the mapping table marks no default"
+    default_row = next(l for l in mapping.splitlines() if "**(default)**" in l)
+    assert "`--deploy none`" in default_row, \
+        "the row marked default is not --deploy none: %s" % default_row[:90]
+    assert "Recommended" not in block, \
+        "a deploy option is still marked Recommended, which competes with the default"
+    print("  the deploy options, the mapping table and the default all agree")
+
+
+def test_the_deploy_answer_is_not_treated_as_a_path() -> None:
+    """The path table must say that the deploy answer belongs to a different flag.
+
+    An agent reading the deploy answer looked it up in the outputs-to-paths table, found
+    nothing, and concluded the user had given an invalid answer. A table that lists only
+    some answers needs to say so, or absence reads as rejection.
+    """
+    doc = open(os.path.join(ROOT, "references", "wizard.md"), encoding="utf-8").read()
+    table = doc[doc.index("## Output to path mapping"):]
+    table = table[:table.index("### Deploy mapping")]
+    assert "not a path" in table, \
+        "the path table does not say the deploy answer is not a path"
+    assert "--deploy" in table, "the path table never points at the --deploy flag"
+
+    # And the natural phrasings must be recognised somewhere in the wizard.
+    for phrase in ("run locally", "localhost", "deploy locally"):
+        assert phrase in doc.lower(), \
+            "the wizard does not recognise %r as a way of asking for local" % phrase
+    print("  the deploy answer is documented as a flag, not a path, with its synonyms")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -552,3 +614,5 @@ if __name__ == "__main__":
     test_the_wizard_forbids_treating_parameters_as_consent()
     test_the_three_step_run_shape_is_documented()
     test_the_streamlit_layout_is_pinned_like_the_react_one()
+    test_the_deploy_question_and_its_mapping_use_the_same_labels()
+    test_the_deploy_answer_is_not_treated_as_a_path()

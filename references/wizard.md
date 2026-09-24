@@ -138,16 +138,34 @@ created. One inert question is worse than one fewer question.
 ```yaml
   - header: "Deploy"
     question: "How should the dashboards run?"
+    defaultAnswer: "Run both locally"
     options:
-      - label: "Streamlit deployed, React on localhost"
-        description: "Fastest. React renders identically and starts in seconds. Recommended for a live walkthrough."
-      - label: "Both deployed to Snowflake"
-        description: "Full SPCS deploy. Adds roughly 95 seconds and a Docker build."
-      - label: "Both local / Nothing deployed"
-        description: "Generate and verify the code; run dashboards locally against Snowflake."
+      - label: "Run both locally"
+        description: "Default. Generate the code and run it on your machine against Snowflake. Nothing is hosted, nothing to tear down."
+      - label: "Host Streamlit on Snowflake, React locally"
+        description: "Adds a compute pool and a STREAMLIT object. React renders identically on localhost and starts in seconds."
+      - label: "Host both on Snowflake"
+        description: "Adds an APPLICATION SERVICE and a Docker build on top of the above. Slowest and the most to remove afterwards."
 ```
 
 Only ask the deploy question if a dashboard was selected.
+
+**The answer to this question is a `--deploy` value. It is not a path.** "Run locally",
+"local", "localhost", "deploy locally", "run it on my machine" and "nothing hosted" are
+all the same answer and all mean `--deploy none`. They are not answers to the outputs
+question and must not be looked up in the path table below — a run that tried to resolve
+"deploy locally" as a path reported that it was not one, then proceeded anyway, which is
+the worst of both outcomes: the user was told their answer was invalid and it was also
+not honoured as stated.
+
+| If the user says | Use |
+|---|---|
+| run locally, local, localhost, on my machine, nothing hosted, don't deploy | `--deploy none` |
+| Streamlit on Snowflake, host the Streamlit one, deploy Streamlit only | `--deploy streamlit` |
+| host both, deploy everything, put it all on Snowflake, SPCS | `--deploy all` |
+
+If the phrasing is genuinely ambiguous between hosting and generating, ask — hosting
+creates account-level objects and costs money, so it is never the thing to assume.
 
 ## Output to path mapping
 
@@ -161,6 +179,13 @@ path 4 pulls in 2 and 3 -- so pass what the user asked for and let `expand()` do
 | Horizon catalog and glossary | `--paths 1` |
 | Streamlit or React dashboard | `--paths 2` |
 | A dashboard **and** an agent | `--paths 4` |
+| *the deploy answer* | **not a path** -- it sets `--deploy`, see the table above |
+
+That last row exists because its absence caused a real failure. Only the **outputs**
+answer maps onto paths. The deploy answer is a separate flag, and an agent that looks it
+up here finds nothing and concludes the user gave an invalid answer. If a wizard answer
+has no row in this table, that means it belongs to a different flag, not that it was
+wrong.
 
 A dashboard plus an agent is path 4 rather than `2,3` because an embedded chat panel that
 cannot see the report's filter state is a different product. Path 4 builds them together.
@@ -169,9 +194,14 @@ cannot see the report's filter state is a different product. Path 4 builds them 
 
 | Deploy selection | `--deploy` flag | What deploys to Snowflake | What runs locally |
 |---|---|---|---|
-| Both local / Nothing deployed **(default)** | `--deploy none` (or `local`) | Backend only (views, semantic view, agent) | Streamlit (`streamlit run pipeline/app_streamlit/app.py`) and React (`cd pipeline/app_react && npm run dev`) |
-| Streamlit deployed, React on localhost | `--deploy streamlit` | Streamlit report (container runtime) | React (`cd pipeline/app_react && npm install && npm run dev`) |
-| Both deployed to Snowflake | `--deploy all` | Streamlit + React App Runtime service | None needed |
+| Run both locally **(default)** | `--deploy none` (or `local`) | Backend only (views, semantic view, agent) | Streamlit (`streamlit run pipeline/app_streamlit/app.py`) and React (`cd pipeline/app_react && npm run dev`) |
+| Host Streamlit on Snowflake, React locally | `--deploy streamlit` | Streamlit report (container runtime) | React (`cd pipeline/app_react && npm install && npm run dev`) |
+| Host both on Snowflake | `--deploy all` | Streamlit + React App Runtime service | None needed |
+
+**The labels in this table are the labels the wizard offers, word for word.** They were
+once different -- the question said "Both local / Nothing deployed" while this table said
+something else -- and two names for one choice is how a valid answer ends up looking
+invalid.
 
 **`--deploy` defaults to `none`.** Deploying creates a compute pool, a `STREAMLIT`
 object and an `APPLICATION SERVICE`; it costs money, it is the slowest part of the
