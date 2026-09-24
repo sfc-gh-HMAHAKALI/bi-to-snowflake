@@ -18,10 +18,10 @@ python3 -m pip install -r requirements.txt          # only if a parse fails
 python3 -m modules.cli parse --type cognos /path/to/model.xml -o /tmp/inventory.json
 
 # 2. See the plan without touching anything
-python3 pipeline/build.py --paths 4 --requirements --dry-run
+python3 pipeline/build.py --paths 4 --dry-run
 
 # 3. Build
-python3 pipeline/build.py --paths 4 --requirements \
+python3 pipeline/build.py --paths 4 \
   --extract /path/to/model.xml --connection <name>
 ```
 
@@ -70,7 +70,7 @@ hardcoded to one account, and the DDL in `pipeline/sql/` carries `{{NAME}}`
 placeholders that are substituted at run time.
 
 ```bash
-python3 pipeline/build.py --paths 4 --requirements \
+python3 pipeline/build.py --paths 4 \
   --database MY_ANALYTICS --kb-database MY_ANALYTICS_KB --prefix ACME \
   --model-label "Acme Sales Model" \
   --extract /path/to/model.xml --connection <name>

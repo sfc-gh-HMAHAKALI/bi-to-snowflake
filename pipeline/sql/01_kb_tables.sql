@@ -167,7 +167,7 @@ CREATE TABLE IF NOT EXISTS KB_METRIC (
 COMMENT = 'Metric definitions, with clone families collapsed onto a canonical pattern.';
 
 -- ---------------------------------------------------------------------
--- Hierarchies (drives the hierarchical item picker, requirement A2)
+-- Hierarchies (drives the hierarchical item picker)
 -- ---------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS KB_HIERARCHY (
@@ -210,7 +210,7 @@ CREATE TABLE IF NOT EXISTS KB_HIERARCHY_LEVEL (
 COMMENT = 'Ordered levels within a hierarchy.';
 
 -- ---------------------------------------------------------------------
--- Grain (requirement E2)
+-- Grain: determinants, as declared in the model
 -- ---------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS KB_GRAIN (
@@ -234,7 +234,7 @@ CREATE TABLE IF NOT EXISTS KB_GRAIN (
 COMMENT = 'Declared grain per entity. Cognos determinants, Power BI table grain, Tableau LOD context.';
 
 -- ---------------------------------------------------------------------
--- Aggregation rules (requirement E6)
+-- Aggregation rules, as declared in the model
 -- ---------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS KB_AGGREGATION_RULE (

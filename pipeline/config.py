@@ -12,7 +12,7 @@ in ``render_sql``. The placeholders are deliberately ``{{NAME}}`` rather than
 Python ``str.format`` braces, because the DDL is full of JSON bodies and
 ``OBJECT_CONSTRUCT`` calls whose own braces would otherwise have to be escaped.
 
-Schema names (ANALYTICS, SALES_ANALYTICS, COMMON_ANALYTICS, REQUIREMENTS,
+Schema names (ANALYTICS, SALES_ANALYTICS, COMMON_ANALYTICS,
 KNOWLEDGE_BASE) are configurable here but are NOT templated into the SQL. They are
 generic, this pipeline creates them itself, and threading another ~850
 substitutions through the DDL would add risk without making the build any more
@@ -40,7 +40,6 @@ class Naming:
     kb_database: str = "BI2SF_KB"
     kb_schema: str = "KNOWLEDGE_BASE"
     analytics_schema: str = "ANALYTICS"
-    requirements_schema: str = "REQUIREMENTS"
     source_schemas: tuple[str, ...] = ("SALES_ANALYTICS", "COMMON_ANALYTICS")
 
     # Object prefix and the objects themselves
@@ -109,7 +108,6 @@ class Naming:
             "KB_SCHEMA": self.kb_schema,
             "DB": self.database,
             "ANALYTICS_SCHEMA": self.analytics_schema,
-            "REQUIREMENTS_SCHEMA": self.requirements_schema,
             "PREFIX": self.prefix,
             "SEMANTIC_VIEW": self.semantic_view,
             "AGENT": self.agent,

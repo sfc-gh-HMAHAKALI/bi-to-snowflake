@@ -88,8 +88,6 @@ ask_user_question:
         description: "Next.js and ECharts on App Runtime. Same component vocabulary as Streamlit."
       - label: "Horizon catalog and glossary"
         description: "Object comments, tag taxonomy, business glossary, ontology handoff."
-      - label: "Requirements scorecard"
-        description: "Cube behaviours E1-E6, each shown naive against correct with the error measured."
   - header: "Target"
     question: "Which database and schema should this build into?"
     type: text
@@ -119,7 +117,6 @@ path 4 pulls in 2 and 3 -- so pass what the user asked for and let `expand()` do
 | Horizon catalog and glossary | `--paths 1` |
 | Streamlit or React dashboard | `--paths 2` |
 | A dashboard **and** an agent | `--paths 4` |
-| Requirements scorecard | `--requirements` |
 
 A dashboard plus an agent is path 4 rather than `2,3` because an embedded chat panel that
 cannot see the report's filter state is a different product. Path 4 deploys them together.
@@ -144,7 +141,7 @@ Proceed?
 Get the plan and the phase count from the build itself rather than estimating:
 
 ```bash
-python3 pipeline/build.py --paths <p> [--requirements] --dry-run
+python3 pipeline/build.py --paths <p> --dry-run
 ```
 
 Timing to quote, measured on the reference model: the knowledge base, views, bridge and
@@ -156,7 +153,7 @@ layers cached, it is considerably less.
 ## Running it
 
 ```bash
-python3 pipeline/build.py --paths <p> [--requirements] \
+python3 pipeline/build.py --paths <p> \
   --extract "<path>" --connection <name> --inventory /tmp/b2s/inventory.json
 ```
 

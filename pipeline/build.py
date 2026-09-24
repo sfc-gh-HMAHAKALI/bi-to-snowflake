@@ -10,7 +10,7 @@ timed -- "easy" should be a number, not an adjective.
     python3 build.py --extract <model.xml>        # foundation only
     python3 build.py --paths 1                    # + catalog / glossary / ontology
     python3 build.py --paths 1,3                  # + Ossie semantic view, RLS, agent
-    python3 build.py --all                        # everything, including E1-E6
+    python3 build.py --all                        # all four paths
     python3 build.py --all --dry-run              # print the plan and stop
 
 Every phase is idempotent. The DDL is CREATE OR REPLACE, the knowledge base load
@@ -143,15 +143,6 @@ FOUNDATION_BRIDGE = Phase(
     "bridge", "Knowledge base to app inventory", "py", "kb_to_inventory.py",
     paths=(2, 4),
     note="217 dimensions, 98 measures, 318 drill paths -- what the React generator reads")
-
-# The E1-E6 proofs are requirements coverage, not a consumption path. They are
-# gated on their own flag rather than being smuggled in as a fifth path: a customer
-# asked for four, and numbering an internal artefact alongside them invites the
-# question "which of our requirements was path 5?" -- to which there is no answer.
-REQUIREMENTS_PHASE = Phase(
-    "reqs", "Requirements E1-E6 with measured proofs", "sql",
-    "sql/40_requirements_e1_e6.sql",
-    note="Each behaviour shown naive vs correct, with the error measured")
 
 
 def expand(paths: set[int]) -> set[int]:
@@ -468,10 +459,8 @@ def main(argv=None) -> int:
                     help="Parse this BI model and load the knowledge base")
     ap.add_argument("--paths", default="",
                     help="Comma-separated: 1=catalog 2=BI 3=semantic view+agent 4=embedded AI")
-    ap.add_argument("--requirements", action="store_true",
-                    help="Also build the E1-E6 requirement proofs (not a path)")
     ap.add_argument("--all", action="store_true",
-                    help="All four paths plus the requirement proofs")
+                    help="All four paths")
     ap.add_argument("--skip-physical", action="store_true",
                     help="Leave the demo data layer alone")
     ap.add_argument("--connection", default="my-demo-account")
@@ -489,20 +478,15 @@ def main(argv=None) -> int:
 
     paths = ({1, 2, 3, 4} if args.all
              else {int(p) for p in args.paths.split(",") if p.strip().isdigit()})
-    want_reqs = args.all or args.requirements
 
     plan = resolve(paths, with_extract=bool(args.extract),
                    with_physical=not args.skip_physical)
-    if want_reqs:
-        plan.append(REQUIREMENTS_PHASE)
 
     print("=" * 74)
     print("BUILD PLAN")
     print("=" * 74)
     for i, p in enumerate(plan, 1):
-        if p.key == REQUIREMENTS_PHASE.key:
-            tag = "requirements"
-        elif p.paths:
+        if p.paths:
             tag = f"path {'/'.join(map(str, p.paths))}"
         else:
             tag = "foundation"

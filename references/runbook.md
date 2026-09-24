@@ -30,11 +30,11 @@ python3 pipeline/teardown.py --database $DB --kb-database $KB_DB \
   --connection my-demo-account --execute
 
 # Cold build
-time python3 pipeline/build.py --paths 4 --requirements \
+time python3 pipeline/build.py --paths 4 \
   --extract /path/to/model.xml --connection my-demo-account
 
 # Second run, to prove idempotency: same command, should converge not duplicate
-time python3 pipeline/build.py --paths 4 --requirements \
+time python3 pipeline/build.py --paths 4 \
   --extract /path/to/model.xml --connection my-demo-account
 ```
 
@@ -86,14 +86,14 @@ Recommended answers at the wizard:
 | Question | Answer | Why |
 |---|---|---|
 | BI tool | IBM Cognos Framework Manager | The only adapter rehearsed through the full build. |
-| Outputs | Semantic view, Cortex Agent, React dashboard, Requirements scorecard | Path 4 plus the scorecard. Drop Streamlit to save 62 seconds unless you plan to show both. |
+| Outputs | Semantic view, Cortex Agent, React dashboard | Path 4. Drop Streamlit to save 62 seconds unless you plan to show both. |
 | Deploy | Streamlit deployed, React on localhost | Saves ~95 seconds and a Docker build. React renders identically. |
 
 Show `--dry-run` first. It prints the plan and changes nothing, which makes the point that
 this is a defined pipeline rather than improvisation:
 
 ```bash
-python3 pipeline/build.py --paths 4 --requirements --dry-run
+python3 pipeline/build.py --paths 4 --dry-run
 ```
 
 18 phases for that selection. Then run it for real and switch to the HTML.
@@ -121,16 +121,14 @@ declares no reports, charts or dashboards at all. Those live in Cognos Analytics
 specifications, which were not in the file. The dashboards are designed from the model's
 semantics, not cloned.
 
-**"Are those numbers from our data?"** For the dashboards, yes. For the cube behaviours in
-the requirements scorecard, only E5 is measured entirely on extracted model tables. E1, E3
-and E4 join the real sales fact to a purpose-built companion, and E2 and E6 run wholly on
-built tables -- because the reference subject area has six tables and contains no forecast,
-currency conversion, supplier or stock snapshot. Those were the examples the requirements
-themselves named. Section E of the overview HTML states this per row; do not soften it.
+**"Are those numbers from our data?"** Yes. Every figure on both dashboards is read from
+the tables generated out of the extracted model, through the semantic view. Where a page
+states a count that came from the knowledge base rather than from a query, it says so at
+the figure; do not soften that labelling.
 
-A related finding worth volunteering: **none of the 4,070 aggregation rules in the model is
-semi-additive.** The Sum-and-Last behaviour E6 asks about is not currently used anywhere in
-this subject area.
+A finding worth volunteering if aggregation comes up: **none of the 4,070 aggregation rules
+in the model is semi-additive.** Sum-across-one-dimension, last-across-time is not currently
+used anywhere in this subject area.
 
 ## If it fails mid-run
 

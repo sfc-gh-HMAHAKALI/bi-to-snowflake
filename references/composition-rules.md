@@ -117,10 +117,9 @@ Each of these exists because its absence produced a visible bug in the reference
 
 ## Honest labelling
 
-If a figure is measured on a table that is not in `tables[]` -- a companion built to
-demonstrate a behaviour the source model does not contain -- the page must say so where the
-figure appears. The reference build needed this for four of six cube behaviours. Silence
-here reads as a claim.
+If a figure is not measured through the semantic view -- a count read from the knowledge
+base, or anything stated rather than queried -- the page must say so where the figure
+appears. Silence here reads as a claim.
 
 ## When the rules do not fit
 
