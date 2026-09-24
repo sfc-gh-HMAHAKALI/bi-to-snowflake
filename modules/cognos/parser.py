@@ -23,6 +23,10 @@ from ..common.logger import get_logger
 
 log = get_logger(__name__)
 
+# Security limits for zipped Framework Manager exports.
+_MAX_UNCOMPRESSED_SIZE = 1_073_741_824  # 1 GB
+_MAX_MEMBER_COUNT = 10_000
+
 # Framework Manager writes an unprefixed default namespace, so every tag comes
 # back from iterparse as "{http://...}querySubject". We strip it rather than
 # hardcode the version, because the BMT schema URI carries a version number
@@ -696,20 +700,105 @@ def _parse_data_source(ds: ET.Element) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _find_model_xml(root: str) -> str | None:
+    """Find the shallowest model.xml under a directory.
+
+    A Framework Manager export is usually zipped with the project folder at the
+    top, so model.xml sits one or two levels down rather than at the root. The
+    shallowest match wins: a deeper one is a segment or a backup copy.
+    """
+    best: tuple[int, str] | None = None
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith("__MACOSX")]
+        for name in filenames:
+            if name.lower() == "model.xml":
+                found = os.path.join(dirpath, name)
+                depth = found[len(root):].count(os.sep)
+                if best is None or depth < best[0]:
+                    best = (depth, found)
+    return None if best is None else best[1]
+
+
+def _extract_archive(path: str) -> str:
+    """Extract a zipped export into a fresh private directory and return it.
+
+    Always a newly created temporary directory, never a fixed path that would
+    have to be emptied first: a blind delete in an agent's shell call is a
+    destructive command the user has to approve, and the run stalls there.
+
+    Guards against zip slip and zip bombs, matching the Tableau and Power BI
+    archive paths.
+    """
+    import tempfile
+    import zipfile
+
+    dest = tempfile.mkdtemp(prefix="bi2sf-cognos-")
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            members = zf.infolist()
+            if len(members) > _MAX_MEMBER_COUNT:
+                raise ParseError(
+                    "Archive has %d members, exceeding limit of %d"
+                    % (len(members), _MAX_MEMBER_COUNT),
+                    context={"path": path, "member_count": len(members)},
+                )
+            total = sum(info.file_size for info in members)
+            if total > _MAX_UNCOMPRESSED_SIZE:
+                raise ParseError(
+                    "Archive uncompressed size (%d bytes) exceeds limit (%d bytes)"
+                    % (total, _MAX_UNCOMPRESSED_SIZE),
+                    context={"path": path, "uncompressed_size": total},
+                )
+            real_dest = os.path.realpath(dest)
+            for info in members:
+                target = os.path.realpath(os.path.join(dest, info.filename))
+                if target != real_dest and not target.startswith(real_dest + os.sep):
+                    raise ParseError(
+                        "Zip slip detected: member '%s' escapes the extraction "
+                        "directory" % info.filename,
+                        context={"member": info.filename},
+                    )
+            zf.extractall(dest)
+    except zipfile.BadZipFile as exc:
+        raise ParseError(
+            "Archive is not readable as a zip file",
+            context={"path": path, "error": str(exc)},
+        ) from exc
+    log.info("Extracted %s to %s", path, dest)
+    return dest
+
+
 def _resolve_model_xml(path: str) -> str:
-    """Accept a model.xml, a .cpf file, or a project directory."""
+    """Accept a model.xml, a zipped export, a .cpf file, or a project directory.
+
+    A zipped export is extracted here rather than by the caller, so no shell
+    unzip step is needed to feed ``--extract`` a download straight from Cognos.
+    """
     if os.path.isdir(path):
-        candidate = os.path.join(path, "model.xml")
-        if os.path.isfile(candidate):
-            return candidate
+        found = _find_model_xml(path)
+        if found:
+            return found
         raise ParseError(
             "Directory contains no model.xml",
             context={"path": path},
         )
+    if not os.path.exists(path):
+        raise ParseError("File not found", context={"path": path})
+    import zipfile
+
+    if zipfile.is_zipfile(path):
+        dest = _extract_archive(path)
+        found = _find_model_xml(dest)
+        if found:
+            return found
+        raise ParseError(
+            "Archive contains no model.xml",
+            context={"path": path, "extracted_to": dest},
+        )
     if path.lower().endswith(".cpf"):
-        candidate = os.path.join(os.path.dirname(path) or ".", "model.xml")
-        if os.path.isfile(candidate):
-            return candidate
+        found = _find_model_xml(os.path.dirname(path) or ".")
+        if found:
+            return found
         raise ParseError(
             "No model.xml beside the .cpf project file",
             context={"cpf": path},
@@ -723,8 +812,10 @@ def parse_framework_manager_model(path: str) -> dict[str, Any]:
     """Parse a Framework Manager project into raw Cognos structures.
 
     Args:
-        path: A ``model.xml``, a ``.cpf`` project file, or the directory
-            containing either.
+        path: A ``model.xml``, a zipped export (``.zip``, or a ``.cpf``
+            stored as a zip), a ``.cpf`` project file beside its ``model.xml``,
+            or the directory containing any of these. An archive is extracted
+            into a fresh temporary directory automatically.
 
     Returns:
         Dict with keys ``model_name``, ``namespaces``, ``data_sources``,

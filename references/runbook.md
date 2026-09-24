@@ -7,7 +7,9 @@ This file is what makes that survivable. Read it the day before, not the hour be
 
 ## Prerequisite that blocks everything
 
-**The source `model.xml` must be on disk.** Point `--extract` at wherever you keep it
+**The source model must be on disk.** Point `--extract` at wherever you keep it --
+a `model.xml`, the project directory, or the `.zip`/`.cpf` it downloaded as; the
+archive is extracted for you, so no shell unzip step is needed. The first copy was lost
 and no longer exists; it cannot be regenerated from the knowledge base, because extraction
 runs one way. Nothing here -- rehearsal, convergence measurement, or the live run -- is
 possible until it is supplied again.

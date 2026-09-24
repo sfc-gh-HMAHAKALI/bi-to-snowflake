@@ -25,6 +25,11 @@ python3 pipeline/build.py --paths 4 --requirements \
   --extract /path/to/model.xml --connection <name>
 ```
 
+`--extract` and `parse` both accept the export as it came: a `model.xml`, the
+project directory, or the `.zip`/`.cpf` it downloaded as. Archives are extracted
+into a fresh temporary directory with zip-slip and zip-bomb guards, so there is
+no unzip step to run first.
+
 ## Docs
 
 | File | Read it when |

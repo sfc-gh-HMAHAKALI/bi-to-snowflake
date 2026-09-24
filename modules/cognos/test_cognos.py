@@ -375,3 +375,95 @@ class TestEndToEnd:
 
         with pytest.raises(ParseError):
             parse_framework_manager_model("/nonexistent/model.xml")
+
+
+# ---------------------------------------------------------------------------
+# Source resolution -- a Cognos export usually arrives zipped
+# ---------------------------------------------------------------------------
+
+_TINY_MODEL = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<project><name>Zipped</name><namespace><name>Model</name></namespace></project>'
+)
+
+
+class TestSourceResolution:
+    """--extract must accept the download as it comes, with no shell unzip step."""
+
+    def _zip(self, tmp_path, arcname, name="export.zip"):
+        import zipfile
+
+        archive = tmp_path / name
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr(arcname, _TINY_MODEL)
+        return str(archive)
+
+    def test_zip_with_model_at_root_resolves(self, tmp_path):
+        from modules.cognos.parser import _resolve_model_xml
+
+        resolved = _resolve_model_xml(self._zip(tmp_path, "model.xml"))
+        assert resolved.endswith("model.xml")
+        assert open(resolved).read() == _TINY_MODEL
+
+    def test_zip_with_project_folder_resolves(self, tmp_path):
+        from modules.cognos.parser import _resolve_model_xml
+
+        resolved = _resolve_model_xml(self._zip(tmp_path, "Sales DMR Model/model.xml"))
+        assert open(resolved).read() == _TINY_MODEL
+
+    def test_cpf_stored_as_zip_resolves(self, tmp_path):
+        from modules.cognos.parser import _resolve_model_xml
+
+        resolved = _resolve_model_xml(
+            self._zip(tmp_path, "proj/model.xml", name="proj.cpf")
+        )
+        assert open(resolved).read() == _TINY_MODEL
+
+    def test_shallowest_model_xml_wins(self, tmp_path):
+        import zipfile
+
+        from modules.cognos.parser import _resolve_model_xml
+
+        archive = tmp_path / "two.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("proj/backup/segment/model.xml", "<project><name>deep</name></project>")
+            zf.writestr("proj/model.xml", _TINY_MODEL)
+        assert open(_resolve_model_xml(str(archive))).read() == _TINY_MODEL
+
+    def test_extraction_target_is_fresh_each_time(self, tmp_path):
+        from modules.cognos.parser import _resolve_model_xml
+
+        src = self._zip(tmp_path, "model.xml")
+        first = _resolve_model_xml(src)
+        second = _resolve_model_xml(src)
+        assert first != second, "a reused fixed path would need clearing first"
+
+    def test_zip_without_model_xml_raises(self, tmp_path):
+        from modules.common.errors import ParseError
+        from modules.cognos.parser import _resolve_model_xml
+
+        with pytest.raises(ParseError):
+            _resolve_model_xml(self._zip(tmp_path, "readme.txt"))
+
+    def test_zip_slip_member_is_rejected(self, tmp_path):
+        import zipfile
+
+        from modules.common.errors import ParseError
+        from modules.cognos.parser import _resolve_model_xml
+
+        archive = tmp_path / "evil.zip"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("../escaped.xml", "<project/>")
+        with pytest.raises(ParseError):
+            _resolve_model_xml(str(archive))
+
+    def test_nested_directory_resolves(self, tmp_path):
+        from modules.cognos.parser import _resolve_model_xml
+
+        proj = tmp_path / "Sales DMR Model"
+        proj.mkdir()
+        (proj / "model.xml").write_text(_TINY_MODEL)
+        assert open(_resolve_model_xml(str(tmp_path))).read() == _TINY_MODEL
+
+    def test_zipped_export_parses_end_to_end(self, tmp_path):
+        assert parse_framework_manager_model(self._zip(tmp_path, "p/model.xml"))

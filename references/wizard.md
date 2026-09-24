@@ -14,7 +14,7 @@ ask_user_question:
     question: "What kind of BI source are we starting from?"
     options:
       - label: "IBM Cognos Framework Manager"
-        description: "A model.xml or .cpf export."
+        description: "A model.xml, a .cpf, or the zip it downloaded as."
       - label: "Tableau"
         description: "twb, twbx, tds or tdsx."
       - label: "Power BI"
@@ -54,6 +54,21 @@ Report anything surprising at this point rather than after the build:
 - **`dashboards` marked synthesised in `provenance`.** For Cognos this is always true and is
   not a defect: Framework Manager is a modelling layer and declares no reports, charts or
   dashboards at all. Never describe the result as a reproduction of existing reports.
+
+### Pass the file as it came
+
+Every adapter takes the archive directly. A Cognos export that downloaded as
+`Sales DMR Model.zip`, a `.twbx`, a `.pbix` -- hand the path straight to
+`--extract`. The parser extracts into a fresh temporary directory of its own,
+finds the model file inside however deeply it is nested, and rejects members
+that try to escape the directory.
+
+**Do not add a shell unzip step**, and never put a delete in front of one. A
+command like `rm -rf ./*` needs the user's approval before it runs, and they
+have no way to tell from the command text that the directory you just made is
+empty -- so they decline, and the build stalls on its first step. There is
+nothing to clean up in the first place: use the path the user gave you.
+
 
 ## Round 2 -- what to build
 
