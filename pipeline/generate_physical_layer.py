@@ -232,7 +232,10 @@ def main(argv=None) -> int:
     ap.add_argument("--columns", default="out/core_columns.json")
     config.add_arguments(ap)
     ap.add_argument("--connection", default="my-demo-account")
-    ap.add_argument("--out-dir", default="sql")
+    # Generated DDL goes to out/ (git-ignored), never to sql/ (tracked). The SQL
+    # that actually runs is passed to run_sql() from memory, so nothing reads
+    # these back -- they are an audit artefact. See path1_catalog_glossary.py.
+    ap.add_argument("--out-dir", default="out")
     ap.add_argument("--execute", action="store_true", help="Run the generated SQL")
     args = ap.parse_args(argv)
     naming = config.from_args(args)

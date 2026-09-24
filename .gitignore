@@ -15,3 +15,13 @@ node_modules/
 .next/
 out/
 *.zip
+
+# Generated DDL. The generators write these under pipeline/out/; earlier versions
+# wrote them over the tracked templates in pipeline/sql/, which left the working
+# tree holding one customer's schema after every build. Listed by name as well,
+# so a stray --out-dir=sql cannot re-introduce the leak silently.
+pipeline/sql/10_physical_layer.sql
+pipeline/sql/11_date_dimension.sql
+pipeline/sql/21_object_comments.sql
+pipeline/sql/22_tag_assignments.sql
+pipeline/sql/23_business_glossary.sql

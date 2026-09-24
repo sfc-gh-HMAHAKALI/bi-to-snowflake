@@ -449,7 +449,13 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Path 1: Horizon catalog, glossary, ontology")
     ap.add_argument("--connection", default="my-demo-account")
     config.add_arguments(ap)
-    ap.add_argument("--out-dir", default="sql")
+    # Generated DDL goes to out/ (git-ignored), never to sql/ (tracked). These
+    # files are an audit artefact -- the SQL that actually runs is passed to
+    # run_sql() from memory below, so nothing reads them back. Writing them over
+    # the tracked templates left the working tree dirty after every build, with
+    # the customer's database, schema and table names in 552 added lines, one
+    # `git add -A` away from being published.
+    ap.add_argument("--out-dir", default="out")
     ap.add_argument("--execute", action="store_true")
     args = ap.parse_args(argv)
 

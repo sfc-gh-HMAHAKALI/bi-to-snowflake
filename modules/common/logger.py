@@ -34,11 +34,17 @@ def setup_logging(
         console: Whether to also log to stderr.
 
     Returns:
-        The configured root logger for the semantic-extraction namespace.
+        The configured root logger for this skill's module namespace.
     """
     global _INITIALIZED
 
-    logger = logging.getLogger("semantic_extraction")
+    # "bi_to_snowflake", not "semantic_extraction": the old name is the name of a
+    # *separately installed skill* on some machines, so log lines read as though
+    # they came from a different skill entirely. On a test whose whole point was
+    # proving no cross-skill leakage that cost a verification detour, and
+    # `import semantic_extraction` raises ModuleNotFoundError -- the name was
+    # vestigial branding, never an importable package.
+    logger = logging.getLogger("bi_to_snowflake")
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
 
     # Avoid duplicate handlers on repeated calls
@@ -76,10 +82,10 @@ def setup_logging(
 
 
 def get_logger(name: str) -> logging.Logger:
-    """Get a child logger under the semantic_extraction namespace.
+    """Get a child logger under this skill's logging namespace.
 
     Usage:
         log = get_logger(__name__)
         log.info("Parsing file: %s", path)
     """
-    return logging.getLogger(f"semantic_extraction.{name}")
+    return logging.getLogger(f"bi_to_snowflake.{name}")

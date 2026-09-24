@@ -57,3 +57,26 @@ export const STATUS = {
   bad: "#B4232C",
   muted: "#5A6672",
 } as const
+
+/**
+ * Neutral chrome: borders, surfaces and muted text.
+ *
+ * These exist because they were missing. A composed page needs a border colour and
+ * a panel background before it can draw a KPI card, and with nothing here the
+ * options were to invent a hex -- which the rules forbid -- or to improvise by
+ * reaching for `SCALE[1]` as a border and `SCALE[0]` as a wash. That improvisation
+ * is not reproducible: two runs can differ, which is the exact failure the locked
+ * library exists to prevent. Naming them makes the choice the library's, once.
+ */
+export const NEUTRAL = {
+  /** Hairline borders and dividers. */
+  line: "#DDE3E8",
+  /** Panel and card background, one step off white. */
+  surface: "#F7F9FA",
+  /** Page background behind the panels. */
+  wash: "#FFFFFF",
+  /** Secondary text: labels, captions, provenance. */
+  muted: STATUS.muted,
+  /** Primary text. */
+  ink: SF.midnight,
+} as const

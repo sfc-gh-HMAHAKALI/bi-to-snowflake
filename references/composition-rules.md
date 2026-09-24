@@ -46,16 +46,36 @@ query is part of composition, not of page render.
 A view is a page tab. Derive them in this order and stop at eight.
 
 1. **Overview** -- always first, always present.
-2. **One view per hierarchy** in `drill_paths` that has two or more levels and whose root
-   dimension appears in a fact-joined table. Name it after the hierarchy's business label,
-   not the column: `Territory`, not `TERRITORY_LEVEL1`.
+2. **One view per categorical axis that has a frame to draw.** Take the axes carried by the
+   `RPT_` views you actually have, keep those whose measured cardinality is 3 or more, and
+   name each after its business label, not the column: `Territory`, not `TERRITORY_LEVEL1`.
 3. **Mix and seasonality** -- only if a date dimension exists with at least twelve distinct
    periods. Below twelve, seasonality is noise and the view is dropped.
 4. **Provenance** -- always last. Where the numbers come from, which view, which rights.
 
-Order is fixed: Overview, then hierarchy views in descending order of their measured total,
-then Mix and seasonality, then Provenance. Ranking hierarchy views by measured magnitude is
-what keeps tab order stable between runs.
+**Select from the frames that exist, not from `drill_paths`.** An earlier version of this
+rule said "one view per `drill_paths` hierarchy with two or more levels", and on the
+reference model that selects the wrong set entirely: the six declared drill paths were
+`Alphabet Grouping`, `Calender Time`, `Customer Class`, `Customer Segment`,
+`Customer Tier 2` and `Time Cube`, while the frames actually built were territory, product,
+customer and period. Territory does not appear in `drill_paths` at all and is by far the
+richest hierarchy in the model — 301 distinct level-4 values, zero nulls. Following the old
+rule literally would have built tabs for hierarchies with no frame behind them and omitted
+the best one.
+
+**Order hierarchy views by measured axis cardinality, descending — not by measured total.**
+The old rule ranked by total, which cannot discriminate here: every `RPT_` view wraps the
+same fact, so territory, product, customer and period all total the identical figure to the
+cent. That is not a quirk of one model; it is true whenever the views wrap one fact, which
+for this generator is always. Cardinality is the tie-break that actually orders them, and it
+is stable between runs. Measure it — do not estimate it:
+
+```sql
+SELECT COUNT(DISTINCT <axis>) FROM <DB>.ANALYTICS.<RPT_ view>;
+```
+
+Cardinality also decides whether an axis is worth a chart at all, which is the same
+measurement the constant-dimension rule below depends on. Take both from one pass.
 
 ## The KPI band
 
@@ -78,19 +98,30 @@ inverted, everything else is not.
 
 Match on data shape. The left column is the only question to ask.
 
-| Data shape | Component | Notes |
-|---|---|---|
-| Measure over ordered time | `TrendLines` / `trend` | Always on the Overview if time exists. |
-| Ranked categories, one measure | `RankedBar` / `ranked_bar` | Horizontal. Bars beat angles for comparison. |
-| Two measures over time, gap matters | `AreaGap` / `area_gap` | Order is load-bearing: the fill goes to the previous series. |
-| Period-to-period change, one measure | `Waterfall` / `waterfall` | See the partial-period rule below. |
-| Category by period, one measure | `Heatmap` / `heatmap` | Needs an explicit legend range or it renders as a bare gradient. |
-| Part-to-whole over time | `MixBar` / `mix_bar` | Stacked to 100%. |
-| Concentration in a ranked set | `Pareto` / `pareto` | Cumulative axis; the 80% line only when in range. |
-| Two-level hierarchy, one measure | `Treemap` / `treemap` | Key nodes by full path or repeated children merge. |
-| Three-plus-level hierarchy | `Sunburst` / `sunburst` | Same keying rule. |
-| Two measures across categories | `CompareBars` | Grouped, not stacked. |
-| Row-level detail, or the user asked for a table | `grid` | Always exportable. |
+| Data shape | Component | Aggregates internally? | Notes |
+|---|---|---|---|
+| Measure over ordered time | `TrendLines` / `trend` | No — pass rows as given | Always on the Overview if time exists. |
+| Ranked categories, one measure | `RankedBar` / `ranked_bar` | **Yes — groups and folds the tail** | Horizontal. Bars beat angles for comparison. |
+| Two measures over time, gap matters | `AreaGap` / `area_gap` | No | Order is load-bearing: the fill goes to the previous series. `AreaGap` also requires `lowerLabel`, `upperLabel` and `gapLabel` — all three non-optional. |
+| Period-to-period change, one measure | `Waterfall` / `waterfall` | **Yes — groups** | See the partial-period rule below. |
+| Category by period, one measure | `Heatmap` / `heatmap` | React: no · Streamlit: **yes — groups** | Needs an explicit legend range or it renders as a bare gradient. |
+| Part-to-whole over time | `MixBar` / `mix_bar` | React: no · Streamlit: **yes — groups** | Stacked to 100%. |
+| Concentration in a ranked set | `Pareto` / `pareto` | **Yes — groups** | Cumulative axis; the 80% line only when in range. |
+| Two-level hierarchy, one measure | `Treemap` / `treemap` | No | Key nodes by full path or repeated children merge. |
+| Three-plus-level hierarchy | `Sunburst` / `sunburst` | No | Same keying rule. |
+| Two measures across categories | `CompareBars` | No | Grouped, not stacked. |
+| Row-level detail, or the user asked for a table | `grid` | No | Always exportable. |
+
+**Do not pre-aggregate for a component that aggregates itself.** The tail-folding rule below
+reads as something the page does, and for most components it is — but `RankedBar` calls
+`collapseTail` internally and `Pareto` and `Waterfall` call `rollup` internally, in both
+libraries. Pre-rolling and pre-folding before handing rows to those three nests an
+`Other (N)` inside another `Other (N)`. The column above is the authority; it was derived by
+reading the component source, which is what the first composition had to do.
+
+Note the React and Streamlit columns genuinely differ for `Heatmap` and `MixBar`. That
+asymmetry is not deliberate design — it is worth knowing before assuming one library's
+behaviour from the other's.
 
 Never a pie or donut for share of total. `RankedBar` answers the same question more
 accurately, and the library deliberately ships no pie.

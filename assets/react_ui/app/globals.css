@@ -1,0 +1,23 @@
+/*
+ * Global stylesheet for a composed React report.
+ *
+ * Import this once from app/layout.tsx. The three Tailwind directives are the only
+ * required content; everything else a page needs comes from the locked library.
+ *
+ * Deliberately defines no colours. The palette lives in theme.ts and reaches the
+ * page through inline styles, so there is one place a colour can come from. A hex
+ * added here would be invisible to the colour-literal guard's intent and would
+ * diverge from the Streamlit surface, which is the thing the shared palette exists
+ * to prevent.
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}

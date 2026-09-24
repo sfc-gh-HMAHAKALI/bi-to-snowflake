@@ -1,0 +1,45 @@
+{
+  "_comment": [
+    "Template for a composed React app's package.json. Copy to",
+    "pipeline/app_react/package.json and drop these _comment keys.",
+    "",
+    "Versions are PINNED deliberately. No template shipped here before, so the",
+    "composer chose versions from memory and picked next@15.1.6, which npm install",
+    "immediately flagged as carrying a security vulnerability (CVE-2025-66478).",
+    "Every version below was resolved and audited clean with `npm audit` at the time",
+    "of writing: next 15.x pulls a postcss <=8.5.22 with four open advisories, and",
+    "the fix is a semver-major move to 16.x, which is why this pins 16.",
+    "",
+    "tailwindcss is pinned to 3.x on purpose: the library's utility classes assume",
+    "the v3 config-file model, and v4's CSS-first model would need different config",
+    "files than the three shipped alongside this template.",
+    "",
+    "Re-audit before trusting these: advisories move. `npm audit` on a fresh install",
+    "is the check, not this comment."
+  ],
+  "name": "bi-report",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "16.3.6",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "echarts": "6.1.0",
+    "echarts-for-react": "3.0.6"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/node": "22.19.1",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.4",
+    "tailwindcss": "3.4.19",
+    "postcss": "8.5.28",
+    "autoprefixer": "10.6.1"
+  }
+}

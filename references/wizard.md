@@ -41,8 +41,16 @@ cd "$SKILL_DIR"   # the directory holding SKILL.md; do not hardcode the skill na
 python3 -m modules.cli parse --type <type> "<path>" -o /tmp/b2s/inventory.json
 ```
 
-Then read the counts out of the inventory: `dimensions`, `measures`, `drill_paths`, `tables`,
-and `provenance`. These are what round 2 and the confirmation are built from.
+Then read the counts out of the inventory. The parse-stage inventory's top-level keys are
+`dimensions`, `metrics`, `hierarchies`, `tables`, `facts`, `relationships`,
+`aggregation_rules`, `security_rules`, `grain_declarations`, `dashboards`, `worksheets`,
+`filters`, `flagged`, `errors`, `complexity_summary`, `source_analysis`, `source_type` and
+`snowflake_target`. These are what round 2 and the confirmation are built from.
+
+Note the two inventories differ. This file has `metrics` and `hierarchies`; the app-stage
+`bim_inventory.json` that `kb_to_inventory.py` writes later has `measures` and
+`drill_paths`. Reading the wrong set costs a few minutes of grepping for keys that are not
+there.
 
 Report anything surprising at this point rather than after the build:
 
@@ -51,9 +59,11 @@ Report anything surprising at this point rather than after the build:
 - **Fewer than four measures.** The KPI band degrades. Say so now.
 - **No hierarchy with two or more levels.** Treemap, sunburst and per-hierarchy views all
   drop out, which is most of the dashboard.
-- **`dashboards` marked synthesised in `provenance`.** For Cognos this is always true and is
-  not a defect: Framework Manager is a modelling layer and declares no reports, charts or
-  dashboards at all. Never describe the result as a reproduction of existing reports.
+- **`dashboards` is `0`.** For Cognos this is always true and is not a defect: Framework
+  Manager is a modelling layer and declares no reports, charts or dashboards at all. Any
+  reporting pages are therefore our construction. Never describe the result as a
+  reproduction of existing reports. (Test `dashboards == 0` — the parse inventory carries no
+  `provenance` block, so there is no synthesised flag to read.)
 
 ### Pass the file as it came
 
@@ -89,9 +99,19 @@ ask_user_question:
       - label: "Horizon catalog and glossary"
         description: "Object comments, tag taxonomy, business glossary, ontology handoff."
   - header: "Target"
-    question: "Which database and schema should this build into?"
+    question: "Which database should this build into?"
     type: text
-    defaultValue: "<from inventory snowflake_target, else DB.SCHEMA>"
+    defaultValue: "<from inventory snowflake_target's database, else BI2SF>"
+```
+
+**Ask for the database only, never the schema.** The schema names are fixed: the DDL in
+`pipeline/sql/` hardcodes `ANALYTICS`, `SALES_ANALYTICS`, `COMMON_ANALYTICS` and
+`KNOWLEDGE_BASE`, and `--analytics-schema` now rejects any other value rather than applying
+it to half the pipeline. Asking "which database and schema?" produced an answer that was
+silently discarded and then a confirmation gate that named `PUBLIC`, where nothing was ever
+created. One inert question is worse than one fewer question.
+
+```yaml
   - header: "Deploy"
     question: "How should the dashboards run?"
     options:
@@ -152,7 +172,24 @@ libraries. Write it to the paths the deploy phases read, or they will not find i
 | Surface | Compose into | Must contain |
 |---|---|---|
 | Streamlit | `pipeline/app_streamlit/` | `app.py`, `data.py`, `pages_impl.py`, `metrics.py`, `pyproject.toml`, `bim_ui/{__init__,compat,filters}.py`, `.streamlit/config.toml` |
-| React | `pipeline/app_react/` | `app.yml`, `package.json`, plus the Next.js tree |
+| React | `pipeline/app_react/` | `app.yml`, `package.json`, `lib/queries.ts`, `tailwind.config.ts`, `postcss.config.mjs`, `app/globals.css`, plus the Next.js tree |
+
+**`lib/queries.ts` has a required shape, not just a required name.** Every dataset must carry
+a `sql:` property holding a backtick template literal, and every object reference must
+resolve inside `${DB}.${SCHEMA}`. `verify_deployment.py` scans for exactly that. A file
+holding the same SQL under bare dataset keys is semantically identical and structurally
+wrong — the scan finds zero datasets and fails. Copy
+`assets/react_ui/queries.template.ts` and replace the bodies; do not invent the shape.
+
+**The React library requires Tailwind.** `assets/react_ui/charts.tsx` uses Tailwind utility
+classes in nine places for its empty states, so without it those elements render unstyled —
+and the empty state is exactly what a demo hits when filters exclude everything. Copy
+`assets/react_ui/tailwind.config.ts`, `postcss.config.mjs` and `app/globals.css` alongside
+the app; they are shipped so the dependency is not a matter of inference.
+
+**Copy `assets/react_ui/package.template.json` rather than choosing versions.** Composing a
+`package.json` from memory once picked `next@15.1.6`, which `npm install` immediately
+flagged as carrying a security vulnerability.
 
 `build.py` preflights this list whenever a deploy phase is in the plan, so a missing
 file is one message before anything is created rather than a failure at phase 15.
@@ -178,21 +215,37 @@ costs nothing.
 
 ```
 From <file name> (<source_type>):
-  <N> dimensions, <N> measures, <N> drill paths across <N> tables
+  <N> dimensions, <N> metrics, <N> hierarchies across <N> tables
   <note any degradation found during profiling>
 
-Will create in <DATABASE>.<SCHEMA>:
+Will create in <DATABASE>:
+  ANALYTICS         <the governed views, the semantic view, the agent, the bridge>
+  SALES_ANALYTICS   <fact and territory tables>
+  COMMON_ANALYTICS  <shared dimensions, including the date dimension>
+and in <KB_DATABASE>:
+  KNOWLEDGE_BASE    <the 14 knowledge-base tables and their views>
+
   <one line per selected output, naming the object>
 
 Plan: <N> phases, roughly <N> minutes cold.
 Proceed?
 ```
 
+Name the schemas that actually receive objects, not a schema the user typed. The gate's
+whole purpose is to state the cost and the location before anything is created, so a wrong
+location here is worse than no gate.
+
 Get the plan and the phase count from the build itself rather than estimating:
 
 ```bash
-python3 pipeline/build.py --paths <p> [--deploy <mode>] --dry-run
+python3 pipeline/build.py --paths <p> [--deploy <mode>] --extract "<path>" --dry-run
 ```
+
+**Include `--extract`** if the run will extract — and it will, on a first build. Without it
+the dry run reports 16 phases where the real plan is 18, because `--extract` injects
+*Parse the BI model* and *Load the knowledge base*. The second of those was measured at
+413s, the single most expensive phase in the build, so omitting the flag understates both
+the phase count and the duration at the exact moment the gate exists to state them.
 
 Timing to quote, measured on the reference model: the knowledge base, views, bridge and
 reporting views total about 42 seconds. A Streamlit deploy adds 62, caller grants 6, a React
@@ -224,7 +277,23 @@ Two things to avoid:
 Report what was created with fully qualified names and URLs, then run the verifier:
 
 ```bash
-python3 pipeline/verify_deployment.py --connection <name>
+python3 pipeline/verify_deployment.py --connection <name> \
+  --database <DB> --kb-database <KB_DB> --prefix <PREFIX> --deploy <mode>
+```
+
+**Pass the same namespace flags the build used.** Without them the verifier checks the
+*default* database, which either passes against somebody else's objects or fails against
+nothing — both confusing, neither about the build just run. `--deploy` matters too: on
+`--deploy none` the Streamlit and App Runtime checks are reported as skipped instead of
+failing on objects that were never meant to exist.
+
+**Use `--format json` when checking whether an object exists.** `snow sql -q "show cortex
+search services in account"` truncates the name column to fit the terminal, so a grep for a
+service name finds nothing and the object looks missing when it is not. That cost a detour
+believing a phase had produced nothing despite reporting `ok`:
+
+```bash
+snow sql -q "show cortex search services in account" --format json -c <name>
 ```
 
 Read `references/composition-rules.md` before generating any page. The libraries in
