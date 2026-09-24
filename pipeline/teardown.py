@@ -66,7 +66,8 @@ def discover(connection: str, database: str, schema: str, kind: str) -> list[str
 
 def plan_statements(db: str, kb_db: str, kb_schema: str, analytics: str,
                     app_service: str, streamlit: str, pool: str,
-                    drop_schemas: bool, drop_databases: bool) -> list[tuple[str, str]]:
+                    drop_schemas: bool, drop_databases: bool,
+                    naming: config.Naming = config.DEFAULT) -> list[tuple[str, str]]:
     """Ordered (label, statement) pairs. Consumers first, producers last."""
     s: list[tuple[str, str]] = []
 
@@ -88,7 +89,6 @@ def plan_statements(db: str, kb_db: str, kb_schema: str, analytics: str,
 
     # 4. Row access policy. Must come after the views, and after any table it is
     #    attached to has been dropped, or the drop is refused while a reference exists.
-    s.append(("Requirements views", f"__DISCOVER_VIEWS__:{db}.REQUIREMENTS"))
     s.append(("Row access policy",
               f"DROP ROW ACCESS POLICY IF EXISTS {db}.{naming.source_schemas[0]}.{naming.row_access_policy}"))
 
@@ -105,7 +105,7 @@ def plan_statements(db: str, kb_db: str, kb_schema: str, analytics: str,
     s.append(("Compute pool", f"DROP COMPUTE POOL IF EXISTS {pool}"))
 
     if drop_schemas:
-        for sch in (analytics, "SALES_ANALYTICS", "COMMON_ANALYTICS", "REQUIREMENTS"):
+        for sch in (analytics, "SALES_ANALYTICS", "COMMON_ANALYTICS"):
             s.append((f"Schema {sch}", f"DROP SCHEMA IF EXISTS {db}.{sch}"))
         s.append((f"Schema {kb_schema}", f"DROP SCHEMA IF EXISTS {kb_db}.{kb_schema}"))
     if drop_databases:
@@ -134,9 +134,12 @@ def main(argv: list[str] | None = None) -> int:
     if a.drop_databases:
         a.drop_schemas = True
 
+    naming = config.from_args(a)
     steps = plan_statements(a.database, a.kb_database, a.kb_schema, a.analytics_schema,
-                            a.app_service, a.streamlit, a.pool,
-                            a.drop_schemas, a.drop_databases)
+                            a.app_service or naming.app_service,
+                            a.streamlit or naming.streamlit,
+                            a.pool or naming.compute_pool,
+                            a.drop_schemas, a.drop_databases, naming)
 
     # Expand the discovery placeholders now so the dry run shows real object names
     # rather than a promise to find some.

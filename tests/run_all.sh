@@ -30,7 +30,13 @@ python3 tests/check_placeholders.py || fail=1
 echo "== no customer identifiers =="
 python3 tests/check_identifiers.py || fail=1
 
-echo "== teardown refuses to act without --execute =="
+echo "== teardown plans a dry run and refuses to act without --execute =="
+if python3 pipeline/teardown.py --database T --kb-database K \
+     --connection __none__ 2>/dev/null | grep -q "statements planned"; then
+  echo "  dry run plans cleanly"
+else
+  echo "  FAIL teardown dry run did not produce a plan"; fail=1
+fi
 if grep -q 'help="Actually run it"' pipeline/teardown.py; then
   echo "  --execute required"
 else
