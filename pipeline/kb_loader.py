@@ -29,6 +29,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -96,12 +97,92 @@ def _sql_array(v: Iterable[Any] | None) -> str:
     return f"PARSE_JSON({_sql_str(json.dumps(list(v), default=str))})::ARRAY"
 
 
-class SnowSqlRunner:
-    """Executes SQL through the Snowflake CLI.
+# A VALUES row constructor takes literals only. `PARSE_JSON('...')` in one is
+# rejected outright -- "Invalid expression [...] in VALUES clause" -- so the
+# VARIANT and ARRAY columns have to carry their JSON as a plain string in VALUES
+# and be converted in the SELECT that wraps it. These recognise the three shapes
+# the renderers above can produce, and nothing else: anything unrecognised sends
+# the batch back to the UNION ALL form rather than guessing.
+_LITERAL = re.compile(r"^(?:NULL|TRUE|FALSE|-?\d+(?:\.\d+)?|'(?:[^']|'')*')$", re.S)
+_VARIANT = re.compile(r"^PARSE_JSON\(('(?:[^']|'')*')\)$", re.S)
+_ARRAY = re.compile(r"^PARSE_JSON\(('(?:[^']|'')*')\)::ARRAY$", re.S)
+_EMPTY_ARRAY = "ARRAY_CONSTRUCT()"
 
-    Chosen over the Python connector so the loader runs with whatever connection
-    and authentication the operator already has configured, including browser and
-    PAT auth, without this script holding credentials.
+
+def _hoist_expressions(
+    batch: list[list[str]], ncols: int
+) -> tuple[list[list[str]], list[str]] | None:
+    """Split pre-rendered row values into VALUES literals plus SELECT expressions.
+
+    Returns ``(rows, select_exprs)`` where every value in ``rows`` is a literal a
+    VALUES clause will accept, and ``select_exprs`` rebuilds the original types
+    from the inner aliases ``v1..vn``. Returns ``None`` when any column cannot be
+    expressed this way, so the caller can fall back rather than emit SQL that is
+    wrong in a way only the server will notice.
+
+    A column is only converted when every row agrees on its shape. In particular a
+    non-NULL literal is never wrapped in ``PARSE_JSON``: that would turn a plain
+    string into a parse error at execution time.
+    """
+    kinds: list[str] = []
+    for j in range(ncols):
+        has_json = has_array = has_real_literal = False
+        for row in batch:
+            v = row[j]
+            if v == "NULL":
+                continue
+            if _VARIANT.match(v):
+                has_json = True
+            elif _ARRAY.match(v) or v == _EMPTY_ARRAY:
+                has_array = True
+            elif _LITERAL.match(v):
+                has_real_literal = True
+            else:
+                return None
+        if has_json and has_array:
+            return None
+        if (has_json or has_array) and has_real_literal:
+            return None
+        kinds.append("json" if has_json else "array" if has_array else "literal")
+
+    rows: list[list[str]] = []
+    for row in batch:
+        out: list[str] = []
+        for j, kind in enumerate(kinds):
+            v = row[j]
+            if kind == "literal" or v == "NULL":
+                out.append(v)
+            elif v == _EMPTY_ARRAY:
+                out.append("'[]'")
+            else:
+                m = _VARIANT.match(v) or _ARRAY.match(v)
+                out.append(m.group(1))
+        rows.append(out)
+
+    select = []
+    for j, kind in enumerate(kinds):
+        alias = "v%d" % (j + 1)
+        if kind == "json":
+            select.append("PARSE_JSON(%s)" % alias)
+        elif kind == "array":
+            select.append("PARSE_JSON(%s)::ARRAY" % alias)
+        else:
+            select.append(alias)
+    return rows, select
+
+
+class SnowSqlRunner:
+    """Executes SQL through the Snowflake CLI, one subprocess per call.
+
+    Kept as the fallback path. Shelling out to the CLI means the loader runs with
+    whatever connection and authentication the operator already has configured,
+    including browser and PAT auth, without this script holding credentials --
+    which is a good property and the reason this was the original design.
+
+    Its cost is that every call is a fresh process and a fresh session. Measured
+    at roughly 4s of process spawn plus auth before any SQL runs, about 14 times
+    across a full load, so ~56s of the knowledge-base phase was startup.
+    ``ConnectorRunner`` below removes that while reading the same credentials.
 
     Statements are written to a temp file and executed as a batch. A failure
     surfaces the CLI's own error output rather than a wrapped exception, because
@@ -129,6 +210,99 @@ class SnowSqlRunner:
         finally:
             os.unlink(path)
 
+    def run_statements(self, statements: list[str], label: str) -> None:
+        """Run a batch as one file. The CLI splits it; that is its job."""
+        self.run_file("\n\n".join(statements), label)
+
+    def close(self) -> None:
+        """No persistent state to release. Present so callers need not branch."""
+
+
+class ConnectorRunner:
+    """Executes SQL over one persistent connector session.
+
+    Same credentials as the CLI path: ``connection_name`` reads the same
+    ``~/.snowflake/connections.toml`` that ``snow -c`` reads, so this does not
+    introduce a second place to configure auth or ask the operator for secrets.
+    What it removes is paying process spawn, TLS and login once per chunk.
+
+    Failure reporting is deliberately kept as good as the CLI's. The reason the
+    CLI was chosen was that it names the failing statement; a naive wrapper loses
+    that, so ``run_statements`` reports the exact statement that raised, truncated,
+    alongside Snowflake's own message.
+
+    Note it takes a *list* of statements rather than a joined string. Splitting a
+    joined string on ";\n" looked equivalent and is not: ``_sql_str`` escapes
+    backslashes and quotes but leaves newlines intact, so any Cognos expression
+    containing a semicolon at the end of a line -- and this model has 25,398
+    expressions -- would be cut in half and sent as invalid SQL. Never parsing the
+    SQL back apart removes that class of bug entirely.
+    """
+
+    def __init__(self, connection: str | None):
+        import snowflake.connector
+
+        try:
+            self.conn = snowflake.connector.connect(connection_name=connection)
+        except TypeError:
+            # Connector predates connection_name. Reading the TOML by hand needs
+            # tomllib (3.11+), so this is a genuine fallback, not a preference.
+            import tomllib
+
+            cfg = os.path.expanduser("~/.snowflake/connections.toml")
+            with open(cfg, "rb") as fh:
+                conf = tomllib.load(fh)[connection]
+            self.conn = snowflake.connector.connect(**conf)
+        self.cur = self.conn.cursor()
+
+    def run_statements(self, statements: list[str], label: str) -> None:
+        for stmt in statements:
+            stmt = stmt.strip().rstrip(";")
+            if not stmt:
+                continue
+            try:
+                self.cur.execute(stmt)
+            except Exception as exc:  # noqa: BLE001 -- re-raised with context
+                raise RuntimeError(
+                    f"{label} failed on this statement:\n{stmt[:600]}\n...\n{exc}"
+                ) from exc
+        log.info("%s ok", label)
+
+    def run_file(self, sql: str, label: str) -> None:
+        """For a caller holding one blob. Uses the connector's own SQL splitter.
+
+        Not used by the KB load itself, which passes statements as a list -- see
+        the class docstring on why splitting a joined string is unsafe here.
+        """
+        for cur in self.conn.execute_string(sql):
+            if cur.description:
+                cur.fetchall()
+        log.info("%s ok", label)
+
+    def close(self) -> None:
+        try:
+            self.cur.close()
+        finally:
+            self.conn.close()
+
+
+def make_runner(connection: str | None, prefer_cli: bool = False):
+    """One persistent session when the connector is available, else the CLI.
+
+    Falling back rather than requiring the connector keeps the loader working on a
+    machine that only has the CLI, which is the environment the original design
+    was written for.
+    """
+    if prefer_cli:
+        return SnowSqlRunner(connection)
+    try:
+        runner = ConnectorRunner(connection)
+        log.info("using one persistent connector session")
+        return runner
+    except Exception as exc:  # noqa: BLE001 -- any failure means use the CLI
+        log.info("connector unavailable (%s); falling back to the snow CLI", exc)
+        return SnowSqlRunner(connection)
+
 
 def _batched(rows: list[str], size: int) -> Iterable[list[str]]:
     for i in range(0, len(rows), size):
@@ -141,15 +315,15 @@ class KnowledgeBaseLoader:
     # Rows per MERGE. Batching matters: 19,921 security rules as individual
     # INSERTs is tens of minutes of round trips.
     BATCH = 500
-    # MERGE statements per snow CLI invocation. Each invocation is a fresh process
-    # and a fresh session, so the process and connection setup dominates for a
-    # large table. Sending every batch for a table in one file cuts the
-    # invocation count from ~90 to ~13 across the whole load.
+    # Statements per runner call. This mattered a great deal when every call was a
+    # fresh `snow sql` subprocess -- it cut invocations from ~90 to ~13. With the
+    # connector runner holding one session it is only the granularity of the
+    # progress log, and it still bounds the CLI fallback's invocation count.
     STATEMENTS_PER_CALL = 40
 
     def __init__(
         self,
-        runner: SnowSqlRunner,
+        runner: SnowSqlRunner | ConnectorRunner,
         source_system: str,
         source_model: str,
         load_id: str,
@@ -190,14 +364,41 @@ class KnowledgeBaseLoader:
 
         statements: list[str] = []
         for batch in _batched(rows, self.BATCH):
-            # UNION ALL, not comma: these are row constructors in a derived
-            # table, not a column list.
-            values = "\n    UNION ALL ".join(
-                "SELECT " + ", ".join(r) for r in batch
-            )
+            # One VALUES row-constructor list, not 500 SELECTs joined by UNION ALL.
+            #
+            # This is a compile-time fix, not an execution one. Measured on the
+            # same 500 rows into the same table: the UNION ALL form spends 1.87s
+            # compiling and 0.57s executing; the VALUES form spends 0.43s and
+            # 0.30s. Compile is 77% of the cost and it scales with the length of
+            # the SQL text rather than the row count, so the phase was mostly
+            # waiting on Snowflake parsing a ~97KB statement, 88 times over.
+            #
+            # Everything else here is unchanged on purpose: same batch size, same
+            # natural-key ON clause, same MERGE semantics. Re-running still
+            # converges rather than duplicating.
+            #
+            # A VALUES clause holds literals only, so the VARIANT and ARRAY columns
+            # travel as strings and are converted in the wrapping SELECT. If a
+            # batch has a column that cannot be expressed that way, fall back to
+            # the UNION ALL form for that batch -- slower, and always valid.
+            hoisted = _hoist_expressions(batch, len(all_columns))
+            if hoisted is None:
+                selects = "\n    UNION ALL ".join(
+                    "SELECT " + ", ".join(
+                        "%s AS %s" % (v, c) for v, c in zip(row, all_columns))
+                    for row in batch)
+                source = "(\n    %s\n)" % selects
+            else:
+                rows, select_exprs = hoisted
+                inner = ",\n        ".join(
+                    "(" + ", ".join(r) + ")" for r in rows)
+                aliases = ", ".join("v%d" % (j + 1) for j in range(len(all_columns)))
+                source = (
+                    "(\n    SELECT %s\n    FROM VALUES\n        %s\n    AS v(%s)\n)"
+                    % (", ".join(select_exprs), inner, aliases))
             statements.append(
                 f"MERGE INTO {self.target_database}.{KB_SCHEMA}.{table} t\n"
-                f"USING (\n    {values}\n) s ({col_list})\n"
+                f"USING {source} s ({col_list})\n"
                 f"ON {on_clause}\n"
                 f"WHEN MATCHED THEN UPDATE SET {set_clause}\n"
                 f"WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({insert_vals});"
@@ -206,8 +407,8 @@ class KnowledgeBaseLoader:
         total = 0
         for i in range(0, len(statements), self.STATEMENTS_PER_CALL):
             chunk = statements[i : i + self.STATEMENTS_PER_CALL]
-            self.runner.run_file(
-                "\n\n".join(chunk), f"{label} ({len(chunk)} merge stmts)"
+            self.runner.run_statements(
+                chunk, f"{label} ({len(chunk)} merge stmts)"
             )
         total = len(rows)
         self.stats[table] = total
@@ -850,6 +1051,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--schema-map", help='JSON: {"connection_alias": "SCHEMA"}')
     ap.add_argument("--security-mapping", help="JSON array of flattened security mapping rows")
     ap.add_argument("--load-id", help="Override the generated load id")
+    ap.add_argument("--use-cli", action="store_true",
+                    help="Execute through one `snow sql` subprocess per chunk instead "
+                         "of one persistent connector session. Slower (a fresh "
+                         "process and login per chunk) but needs no Python connector")
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args(argv)
 
@@ -877,8 +1082,9 @@ def main(argv: list[str] | None = None) -> int:
 
     log.info("Loading %s model %r as load_id=%s", args.source_system, model, load_id)
 
+    runner = make_runner(args.connection, prefer_cli=args.use_cli)
     loader = KnowledgeBaseLoader(
-        SnowSqlRunner(args.connection),
+        runner,
         args.source_system,
         model,
         load_id,
@@ -886,17 +1092,22 @@ def main(argv: list[str] | None = None) -> int:
         args.kb_database,
     )
 
-    loader.load_source_model(inv, analysis, args.inventory)
-    loader.load_entities(inv, analysis)
-    loader.load_terms(inv)
-    loader.load_metrics(inv)
-    loader.load_hierarchies(inv)
-    loader.load_grain(inv)
-    loader.load_aggregation_rules(inv)
-    loader.load_relationships(inv)
-    loader.load_security(inv, mapping_rows)
-    loader.load_lineage(inv)
-    loader.load_issues(inv, analysis)
+    try:
+        loader.load_source_model(inv, analysis, args.inventory)
+        loader.load_entities(inv, analysis)
+        loader.load_terms(inv)
+        loader.load_metrics(inv)
+        loader.load_hierarchies(inv)
+        loader.load_grain(inv)
+        loader.load_aggregation_rules(inv)
+        loader.load_relationships(inv)
+        loader.load_security(inv, mapping_rows)
+        loader.load_lineage(inv)
+        loader.load_issues(inv, analysis)
+    finally:
+        # Release the session even on failure, so a failed load does not leave a
+        # connection open for the rest of the build.
+        runner.close()
 
     print(json.dumps({
         "status": "ok",
