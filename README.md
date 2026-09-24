@@ -11,7 +11,7 @@ from and how to re-sync it.
 ## Quick start
 
 ```bash
-cd "$HOME/.snowflake/cortex/skills/bi-to-snowflake"
+cd "$SKILL_DIR"   # the directory holding SKILL.md; do not hardcode the skill name
 python3 -m pip install -r requirements.txt          # only if a parse fails
 
 # 1. Read the model

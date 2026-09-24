@@ -37,7 +37,7 @@ user has to go and look up is worse than a wrong guess they can correct.
 ## Profile -- read the model before asking anything else
 
 ```bash
-cd "$HOME/.snowflake/cortex/skills/bi-to-snowflake"
+cd "$SKILL_DIR"   # the directory holding SKILL.md; do not hardcode the skill name
 python3 -m modules.cli parse --type <type> "<path>" -o /tmp/b2s/inventory.json
 ```
 

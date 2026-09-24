@@ -21,10 +21,19 @@ be installed.
 
 ## Setup
 
+Every command below runs from the directory holding this `SKILL.md` — the skill you just
+loaded, whatever it is named. Set `SKILL_DIR` to that path once and use it throughout.
+
 ```bash
-SKILL_DIR="$HOME/.snowflake/cortex/skills/bi-to-snowflake"
+SKILL_DIR="$HOME/.snowflake/cortex/skills/<this-skill-name>"   # e.g. bi-to-snowflake
 cd "$SKILL_DIR"
 ```
+
+**Do not hardcode `bi-to-snowflake`.** This skill gets cloned and renamed for testing, and a
+hardcoded name silently runs a *different* installed skill whose vendored code has drifted —
+which cost one debug session an afternoon of chasing a parse failure that was really a wrong
+working directory. `pipeline/build.py --skill-dir` defaults to its own repo root for the same
+reason.
 
 If a parse fails on a missing module:
 

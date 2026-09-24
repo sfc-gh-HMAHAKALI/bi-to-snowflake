@@ -21,7 +21,7 @@ Once you have it, put it somewhere permanent, not `/tmp`. That is how the first 
 ### 1. Rehearse a full cold run, twice
 
 ```bash
-cd "$HOME/.snowflake/cortex/skills/bi-to-snowflake"
+cd "$SKILL_DIR"   # the directory holding SKILL.md; do not hardcode the skill name
 
 # Clean slate
 python3 pipeline/teardown.py --database $DB --kb-database $KB_DB \
