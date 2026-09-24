@@ -61,6 +61,9 @@ class Phase:
     # Which paths need this phase. Empty means foundation -- always run.
     paths: tuple[int, ...] = ()
     note: str = ""
+    # Print this phase's output live instead of capturing it. For phases
+    # long enough that a silent terminal reads as a hang.
+    stream: bool = False
     # Phase keys that must have already run. Declared, not inferred: list order
     # used to be the only record of these, and it was wrong -- the inventory
     # bridge was ordered before the semantic view it reads, and the symptom
@@ -86,6 +89,7 @@ EXTRACT: list[Phase] = [
     Phase("extract", "Parse the BI model", "extract", "",
           note="Streaming parse; emits the unified inventory"),
     Phase("kb-load", "Load the knowledge base", "py", "kb_loader.py",
+          stream=True,
           note="MERGE on the source key, so a reload updates in place"),
 ]
 
@@ -278,15 +282,36 @@ def run_sql_file(path: str, connection: str) -> tuple[bool, str]:
     return proc.returncode == 0, out
 
 
-def run_py(script: str, extra: list[str], connection: str) -> tuple[bool, str]:
+def run_py(script: str, extra: list[str], connection: str,
+           stream: bool = False) -> tuple[bool, str]:
     # Forward the naming too. Previously only --connection was passed, so every
     # child script silently fell back to its own defaults and a build could
     # write half its objects into one database and half into another.
     cmd = [sys.executable, os.path.join(HERE, script), *extra,
            "--connection", connection, *config.forward_flags(NAMING)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=HERE)
-    out = (proc.stdout or "") + (proc.stderr or "")
-    return proc.returncode == 0, out
+    if not stream:
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=HERE)
+        out = (proc.stdout or "") + (proc.stderr or "")
+        return proc.returncode == 0, out
+
+    # Long phases print their own progress, and capturing it means nobody sees it
+    # until the phase is over -- which for the knowledge base load is around two
+    # minutes of a silent terminal that reads as a hang. Tee it: show each line as
+    # it arrives, and keep a copy so the failure path still reports everything.
+    lines: list[str] = []
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1, cwd=HERE)
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        lines.append(line)
+        # Drop the logging prefix for the live view; the captured copy keeps it,
+        # so a failure report still has timestamps and levels.
+        shown = line.rstrip("\n")
+        if " | " in shown:
+            shown = shown.split(" | ")[-1]
+        print("      " + shown, flush=True)
+    proc.wait()
+    return proc.returncode == 0, "".join(lines)
 
 
 def run_app_deploy(sql_path: str, connection: str) -> tuple[bool, str]:
@@ -696,12 +721,16 @@ def main(argv=None) -> int:
     results = []
     t_all = time.time()
     for i, p in enumerate(plan, 1):
-        print(f"[{i}/{len(plan)}] {p.title} ... ", end="", flush=True)
+        if p.stream:
+            print(f"[{i}/{len(plan)}] {p.title} ...", flush=True)
+        else:
+            print(f"[{i}/{len(plan)}] {p.title} ... ", end="", flush=True)
         t0 = time.time()
         if p.kind == "sql":
             ok, out = run_sql_file(p.target, args.connection)
         elif p.kind == "py":
-            ok, out = run_py(p.target, p.args, args.connection)
+            ok, out = run_py(p.target, p.args, args.connection,
+                             stream=p.stream)
         elif p.kind == "app":
             ok, out = run_app_deploy(p.target, args.connection)
         elif p.kind == "react":
@@ -720,7 +749,10 @@ def main(argv=None) -> int:
                     ]
         dt = time.time() - t0
         results.append({"phase": p.key, "title": p.title, "ok": ok, "seconds": round(dt, 1)})
-        print(f"{'ok' if ok else 'FAILED'}  {dt:6.1f}s")
+        if p.stream:
+            print(f"      -> {'ok' if ok else 'FAILED'}  {dt:6.1f}s")
+        else:
+            print(f"{'ok' if ok else 'FAILED'}  {dt:6.1f}s")
         if not ok:
             # Stop on failure: later phases read what earlier ones produce, so
             # continuing would report a cascade of errors with one real cause.

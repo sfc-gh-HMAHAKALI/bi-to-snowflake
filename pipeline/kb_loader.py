@@ -33,6 +33,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable
@@ -40,6 +41,88 @@ from typing import Any, Iterable
 import config
 
 log = logging.getLogger("kb_loader")
+
+# What each knowledge base table holds, in the reader's terms rather than ours.
+#
+# This phase is the longest in the build -- around two minutes on a large model --
+# and until now it narrated itself as a stream of "<label> ok" lines. Someone
+# watching a progress log for two minutes deserves to know what is being built and
+# why it takes that long, and "KB load" tells them nothing. Every table the loader
+# writes must appear here; tests/check_kb_loader_target.py enforces that, so a new
+# table cannot be added without a sentence explaining it.
+TABLE_PURPOSE: dict[str, str] = {
+    "KB_SOURCE_MODEL": "the model itself -- which BI tool it came from, and when",
+    "KB_ENTITY": "every table and view the BI model exposed, with its grain",
+    "KB_TERM": "the business glossary: every field, its meaning and its formula",
+    "KB_METRIC": "measures, with the aggregation each one is allowed to use",
+    "KB_HIERARCHY": "drill paths, such as territory or product hierarchies",
+    "KB_HIERARCHY_LEVEL": "each level within those drill paths, in order",
+    "KB_GRAIN": "the declared grain of each fact, so joins cannot silently fan out",
+    "KB_AGGREGATION_RULE": "how each measure rolls up, including semi-additive ones",
+    "KB_RELATIONSHIP": "joins between entities, with their cardinality",
+    "KB_SECURITY_RULE": "row-level security filters carried over from the BI model",
+    "KB_SECURITY_MAPPING": "which groups those filters apply to",
+    "KB_LINEAGE": "where every field came from, column by column",
+    "KB_ISSUE": "things worth a human look: duplicate or conflicting definitions",
+}
+
+
+class LoadProgress:
+    """Narrates the knowledge base load while it runs.
+
+    The phase is unavoidably slow -- it is writing tens of thousands of rows across
+    thirteen tables -- so the useful thing is not a spinner but an explanation:
+    which table, what it holds, how far through, and how long so far. Table counts
+    are honest (the sequence is fixed at thirteen); no percentage of rows is shown,
+    because the row total is not known until the last table has been built.
+    """
+
+    TOTAL_TABLES = len(TABLE_PURPOSE)
+
+    def __init__(self, emit=log.info) -> None:
+        self.emit = emit
+        self.started = time.monotonic()
+        self.done = 0
+        self.rows = 0
+
+    def opening(self, model: str, source_system: str) -> None:
+        self.emit("Building the knowledge base for %s model %r.", source_system, model)
+        self.emit("  %d tables describing what the model MEANS, not its data.",
+                  self.TOTAL_TABLES)
+        self.emit("  Everything downstream is generated from these tables: the")
+        self.emit("  physical layer, the semantic view, the governed views, the")
+        self.emit("  catalog and the agent.")
+        self.emit("  Two minutes is normal on a large model. Security filters are")
+        self.emit("  usually the slowest table -- there are tens of thousands of them.")
+
+    def table_start(self, table: str) -> None:
+        """Announce the table BEFORE it is written.
+
+        This is the line that matters. Reporting only on completion meant the
+        longest table -- security filters, around 70 seconds on its own -- showed
+        nothing at all while it ran, which is precisely the silence this exists to
+        remove. Kept narrow so it survives a wrapped terminal pane.
+        """
+        self.emit("  [%2d/%d] %s", self.done + 1, self.TOTAL_TABLES, table)
+        self.emit("         %s",
+                  TABLE_PURPOSE.get(table, "no description -- see TABLE_PURPOSE"))
+
+    def table_done(self, table: str, rows: int) -> None:
+        self.done += 1
+        self.rows += rows
+        self.emit("         -> %s rows  (%s elapsed)", f"{rows:,}", self._elapsed())
+
+    def closing(self) -> None:
+        self.emit("Knowledge base loaded: %s rows across %d tables in %s.",
+                  f"{self.rows:,}", self.done, self._elapsed())
+
+    def closing(self) -> None:
+        self.emit("Knowledge base loaded: %s rows across %d tables in %s.",
+                  f"{self.rows:,}", self.done, self._elapsed())
+
+    def _elapsed(self) -> str:
+        s = int(time.monotonic() - self.started)
+        return "%dm%02ds" % (s // 60, s % 60) if s >= 60 else "%ds" % s
 
 # Defaults only. The effective values come from the naming flags in config,
 # which build.py forwards to every child script.
@@ -329,6 +412,7 @@ class KnowledgeBaseLoader:
         load_id: str,
         schema_map: dict[str, str],
         kb_database: str,
+        progress: "LoadProgress | None" = None,
     ):
         self.runner = runner
         self.system = source_system
@@ -339,6 +423,9 @@ class KnowledgeBaseLoader:
         # KNOWLEDGE_BASE in {{KB_DB}}, and the two are commonly different databases.
         self.target_database = kb_database
         self.stats: dict[str, int] = {}
+        # Optional so existing callers and the tests keep working unchanged; when
+        # absent, _merge falls back to the old one-line-per-table log.
+        self.progress = progress
 
     # -- helpers ------------------------------------------------------------
 
@@ -351,8 +438,13 @@ class KnowledgeBaseLoader:
         label: str,
     ) -> None:
         """MERGE a batch of literal rows into a KB table."""
+        if self.progress is not None:
+            self.progress.table_start(table)
         if not rows:
-            log.info("%s: nothing to load", label)
+            if self.progress is not None:
+                self.progress.table_done(table, 0)
+            else:
+                log.info("%s: nothing to load", label)
             self.stats[table] = 0
             return
 
@@ -389,9 +481,14 @@ class KnowledgeBaseLoader:
                     for row in batch)
                 source = "(\n    %s\n)" % selects
             else:
-                rows, select_exprs = hoisted
+                # Deliberately NOT `rows` -- that is this function's parameter, and
+                # rebinding it here made `total = len(rows)` below report the size
+                # of the last batch instead of the whole input. The data loaded was
+                # always correct; the count in the JSON summary was not. A 19,051
+                # row table reported as 51.
+                batch_rows, select_exprs = hoisted
                 inner = ",\n        ".join(
-                    "(" + ", ".join(r) + ")" for r in rows)
+                    "(" + ", ".join(r) + ")" for r in batch_rows)
                 aliases = ", ".join("v%d" % (j + 1) for j in range(len(all_columns)))
                 source = (
                     "(\n    SELECT %s\n    FROM VALUES\n        %s\n    AS v(%s)\n)"
@@ -412,7 +509,10 @@ class KnowledgeBaseLoader:
             )
         total = len(rows)
         self.stats[table] = total
-        log.info("%s: %d rows", label, total)
+        if self.progress is not None:
+            self.progress.table_done(table, total)
+        else:
+            log.info("%s: %d rows", label, total)
 
     def _base(self) -> list[str]:
         return [_sql_str(self.system), _sql_str(self.model)]
@@ -1082,6 +1182,9 @@ def main(argv: list[str] | None = None) -> int:
 
     log.info("Loading %s model %r as load_id=%s", args.source_system, model, load_id)
 
+    progress = LoadProgress()
+    progress.opening(model, args.source_system)
+
     runner = make_runner(args.connection, prefer_cli=args.use_cli)
     loader = KnowledgeBaseLoader(
         runner,
@@ -1090,6 +1193,7 @@ def main(argv: list[str] | None = None) -> int:
         load_id,
         schema_map,
         args.kb_database,
+        progress=progress,
     )
 
     try:
@@ -1104,6 +1208,7 @@ def main(argv: list[str] | None = None) -> int:
         loader.load_security(inv, mapping_rows)
         loader.load_lineage(inv)
         loader.load_issues(inv, analysis)
+        progress.closing()
     finally:
         # Release the session even on failure, so a failed load does not leave a
         # connection open for the rest of the build.

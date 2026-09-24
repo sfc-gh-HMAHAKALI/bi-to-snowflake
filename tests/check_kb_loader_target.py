@@ -12,6 +12,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pipeline"))
+SRC = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def test_loader_targets_kb_database_not_analytics_database():
@@ -277,6 +278,97 @@ def test_an_unrecognised_expression_falls_back_instead_of_emitting_bad_sql() -> 
     print("  unhoistable batches fall back to SELECT/UNION ALL, never invalid SQL")
 
 
+def test_reported_row_counts_cover_every_batch_not_just_the_last() -> None:
+    """The row count in the summary must be the whole input, not the last batch.
+
+    A multi-batch table reported the size of its final batch: 19,051 rows came back
+    as 51, 4,070 as 70, 4,550 as 50 -- every error an exact multiple of BATCH, which
+    is the tell. The cause was one line in _merge assigning to `rows`, the function's
+    own parameter, inside the per-batch loop, so `total = len(rows)` afterwards saw
+    only what was left there. The data written was always correct, which is why
+    nothing else caught it: only the number we reported was wrong, and it under-
+    reported, so it never looked like a duplicate-row problem.
+
+    Asserted with more rows than one batch holds, because with a single batch the
+    bug is invisible -- the last batch is the whole input.
+    """
+    import kb_loader as K
+
+    class Fake:
+        def run_statements(self, stmts, label): pass
+        def run_file(self, sql, label): raise AssertionError("must be a list")
+        def close(self): pass
+
+    ldr = K.KnowledgeBaseLoader(Fake(), "cognos", "M", "load1", {}, "MYKB")
+    n = K.KnowledgeBaseLoader.BATCH * 3 + 7          # deliberately not a multiple
+    rows = [[K._sql_str("k%d" % i), K._sql_variant({"i": i})] for i in range(n)]
+    ldr._merge("KB_THING", ["C1"], ["C1", "C2"], rows, "thing")
+    assert ldr.stats["KB_THING"] == n, (
+        "reported %d rows for an input of %d -- the count is per-batch, not total"
+        % (ldr.stats["KB_THING"], n))
+
+    # And the loader must not have mutated the caller's list.
+    assert len(rows) == n, "_merge rebound or truncated the rows it was given"
+    print("  reported row counts span every batch, and the input list is untouched")
+
+
+def test_the_knowledge_base_load_narrates_itself() -> None:
+    """The longest phase must explain itself while it runs.
+
+    Two minutes of a silent terminal reads as a hang. Three things have to hold:
+    every table the loader writes has a plain-language description; the table is
+    announced *before* it is written, not only after (the slowest table takes over a
+    minute on its own, so completion-only reporting leaves exactly the gap this
+    exists to close); and build.py streams the phase rather than capturing it, since
+    narration nobody sees is worse than none.
+    """
+    import kb_loader as K
+
+    # (i) Every table the loader writes is described.
+    src = open(os.path.join(SRC, "pipeline", "kb_loader.py"), encoding="utf-8").read()
+    written = set(re.findall(r'self\._merge\(\s*"([A-Z_]+)"', src))
+    assert written, "no _merge calls found -- has the loader been restructured?"
+    undocumented = sorted(written - set(K.TABLE_PURPOSE))
+    assert not undocumented, (
+        "these knowledge base tables have no description in TABLE_PURPOSE, so the "
+        "load would narrate them as bare identifiers: %s" % undocumented)
+    stale = sorted(set(K.TABLE_PURPOSE) - written)
+    assert not stale, "TABLE_PURPOSE describes tables the loader no longer writes: %s" % stale
+
+    # (ii) Announced before the write, not only on completion.
+    said: list[str] = []
+    prog = K.LoadProgress(emit=lambda fmt, *a: said.append(fmt % a))
+    prog.opening("M", "cognos")
+    assert any("13 tables" in s or "tables describing" in s for s in said), \
+        "the opening does not say what is being built"
+
+    class Fake:
+        def run_statements(self, stmts, label): pass
+        def run_file(self, sql, label): raise AssertionError("must be a list")
+        def close(self): pass
+
+    said.clear()
+    ldr = K.KnowledgeBaseLoader(Fake(), "cognos", "M", "l", {}, "MYKB", progress=prog)
+    ldr._merge("KB_TERM", ["C1"], ["C1"], [[K._sql_str("a")]], "terms")
+    joined = "\n".join(said)
+    assert "KB_TERM" in joined, "the table was never announced"
+    assert K.TABLE_PURPOSE["KB_TERM"] in joined, "the description was not printed"
+    first_announce = next(i for i, s in enumerate(said) if "KB_TERM" in s)
+    first_result = next((i for i, s in enumerate(said) if "rows" in s), len(said))
+    assert first_announce < first_result, \
+        "the table is only reported after it is written -- the wait stays silent"
+
+    # (iii) build.py streams this phase.
+    b = open(os.path.join(SRC, "pipeline", "build.py"), encoding="utf-8").read()
+    assert "stream: bool = False" in b, "Phase has no stream flag"
+    assert "stream=p.stream" in b, "the flag is never passed to run_py"
+    kb_decl = b[b.index('Phase("kb-load"'):]
+    kb_decl = kb_decl[:kb_decl.index("),")]
+    assert "stream=True" in kb_decl, \
+        "the knowledge base load does not stream, so its narration is captured and lost"
+    print("  the load names every table, announces it before writing, and streams")
+
+
 if __name__ == "__main__":
     test_loader_targets_kb_database_not_analytics_database()
     test_main_wires_kb_database_flag()
@@ -286,3 +378,5 @@ if __name__ == "__main__":
     test_an_unrecognised_expression_falls_back_instead_of_emitting_bad_sql()
     test_statements_are_never_reparsed_out_of_a_joined_string()
     test_both_runners_share_an_interface_and_the_cli_remains_a_fallback()
+    test_reported_row_counts_cover_every_batch_not_just_the_last()
+    test_the_knowledge_base_load_narrates_itself()
