@@ -25,3 +25,11 @@ pipeline/sql/11_date_dimension.sql
 pipeline/sql/21_object_comments.sql
 pipeline/sql/22_tag_assignments.sql
 pipeline/sql/23_business_glossary.sql
+
+# Composed app source. Written per model by the composition step, never committed:
+# it necessarily names the customer's target database, so it is exactly what the
+# identifier guard must NOT be scanning. Ignoring it here is what keeps that guard
+# meaningful -- the guard reads everything `git add -A` would stage, so an
+# unignored per-run artefact makes it fail after every successful path 2/4 build.
+pipeline/app_streamlit/
+pipeline/app_react/

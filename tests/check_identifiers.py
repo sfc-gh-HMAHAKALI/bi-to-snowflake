@@ -13,9 +13,21 @@ table names, one ``git add -A`` away from being published. The generators now wr
 caught the old behaviour and would not catch a stray ``--out-dir sql`` reintroducing it.
 Anything ignored by ``.gitignore`` is out of scope by definition: it cannot be committed.
 
-Excluded on purpose: this file, which has to contain the patterns it bans, and the
-upstream attribution URL in VENDOR.md, which names the repository this code was
-vendored from rather than any customer.
+Excluded on purpose, and only these two:
+
+* This file, which has to contain the patterns it bans.
+* The ``name:`` line of ``SKILL.md``'s frontmatter. Installing this skill under a
+  second name to test it against a live model is the supported way to try a
+  change without disturbing the installed copy, and that rename is the one place
+  the engagement's name legitimately appears in a working tree. It is the skill's
+  own install identity, not customer content, and it is never what leaks. Without
+  this the suite cannot pass in the very clone you would use to validate a fix.
+
+No exception is made for a configured database or object prefix. Those are the
+identifiers most worth catching, and the composed app source that necessarily
+carries them is ignored by ``.gitignore`` instead -- out of scope because it
+cannot be committed, which is the honest reason, rather than allowlisted while
+still staged.
 """
 import os
 import re
@@ -29,10 +41,34 @@ SPU = re.compile(r"\bSPU\b|SPU_")
 
 SELF = "tests/check_identifiers.py"
 
+# The skill's own install name, in SKILL.md frontmatter. Anchored to `name:` at the
+# start of a line so it cannot excuse a customer identifier anywhere else in the
+# file -- the description, the trigger list and the body are all still scanned.
+RENAME_LINE = re.compile(r"^name:\s*\S+\s*$")
+
 # Max offending lines to print per file. A generated file carries hundreds of hits and
 # they are all the same problem; listing 15 of them buried the one hit in SKILL.md that
 # a reader needed to see. Report per file, with a count.
 PER_FILE = 3
+
+
+def is_local_rename(rel: str, line: str) -> bool:
+    """True for the one line that names the skill's own installed copy."""
+    return rel == "SKILL.md" and bool(RENAME_LINE.match(line))
+
+
+def flags(rel: str, line: str) -> bool:
+    """Whether this line, in this file, counts as a customer identifier.
+
+    The single decision point, so a test can assert on behaviour rather than on
+    the presence of string literals in this file. A syntactic test -- "no banned
+    name appears in quotes here" -- is evaded by any allowlist assembled from
+    fragments, and an allowlist is the tempting wrong fix for the composed app
+    source naming its own target database.
+    """
+    if is_local_rename(rel, line):
+        return False
+    return bool(BANNED.search(line) or SPU.search(line))
 
 
 def staged_set(root: str) -> list[str]:
@@ -55,7 +91,7 @@ def main() -> int:
         except (UnicodeDecodeError, IsADirectoryError, FileNotFoundError):
             continue
         for i, line in enumerate(text.split("\n"), 1):
-            if BANNED.search(line) or SPU.search(line):
+            if flags(rel, line):
                 by_file.setdefault(rel, []).append("%d: %s" % (i, line.strip()[:70]))
 
     if by_file:
