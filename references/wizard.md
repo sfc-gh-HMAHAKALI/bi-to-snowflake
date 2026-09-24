@@ -172,7 +172,59 @@ libraries. Write it to the paths the deploy phases read, or they will not find i
 | Surface | Compose into | Must contain |
 |---|---|---|
 | Streamlit | `pipeline/app_streamlit/` | `app.py`, `data.py`, `pages_impl.py`, `metrics.py`, `pyproject.toml`, `bim_ui/{__init__,compat,filters}.py`, `.streamlit/config.toml` |
-| React | `pipeline/app_react/` | `app.yml`, `package.json`, `lib/queries.ts`, `tailwind.config.ts`, `postcss.config.mjs`, `app/globals.css`, plus the Next.js tree |
+| React | `pipeline/app_react/` | `app.yml`, `package.json`, `lib/queries.ts`, `lib/theme.ts`, `lib/charts.tsx`, `lib/ui.tsx`, `tailwind.config.ts`, `postcss.config.mjs`, `app/globals.css`, plus the Next.js tree |
+
+**The React component library goes in `lib/`, not the app root.** This is fixed by the
+library's own imports and is not a matter of taste: `charts.tsx` imports
+`@/lib/theme` while `ui.tsx` imports `./theme`, and the only layout satisfying both is
+`lib/theme.ts` beside `lib/charts.tsx` and `lib/ui.tsx`. `tailwind.config.ts` already
+globs `./lib/**/*.{ts,tsx}`, which confirms it. Copying the three files to the app root
+instead fails the build outright with
+`Module not found: Can't resolve '@/lib/theme'` — one wasted build cycle, and the error
+names a path that exists nowhere, so it reads like a broken asset rather than a
+misplacement.
+
+**Give the React page a background from the palette.** `app/globals.css` deliberately
+defines no colours, and Tailwind's preflight sets no `body` background, so a composed
+React app inherits the operating system's dark mode while the Streamlit surface pins
+light through `.streamlit/config.toml`. The two surfaces are supposed to look identical;
+without this they do not, and the failure only shows on a machine set to dark mode, which
+is how it survives review. `theme.ts` already exports `NEUTRAL.wash` described as "page
+background behind the panels" — apply it in `app/layout.tsx`:
+
+```tsx
+<body style={{ background: NEUTRAL.wash, color: NEUTRAL.ink }}>{children}</body>
+```
+
+That wires the locked theme in rather than inventing a colour, so it stays inside the
+never-restyle rule and past the colour guard.
+
+**The React files composition has to write, and what each must do.** Eight assets ship;
+everything else below is written per run, which is where run-to-run variance comes from.
+Naming them does not make them generated code — it stops each run re-deciding the same
+questions differently.
+
+| File | Must do |
+|---|---|
+| `lib/snowflake.ts` | One `query()` over the SQL REST API. **No driver** — `package.template.json` pins none, and adding one means choosing a version the template declined to pin. Must follow result partitions, and must coerce numeric columns, because the API returns every value as a string and client-side aggregation would otherwise concatenate. |
+| `app/api/data/route.ts` | One route returning **every** frame, fetched concurrently. Not a route per panel: first paint is one round trip. |
+| `app/api/ask/route.ts` | Call the bridge, then re-run the returned statement for its rows, accepting only `SELECT`/`WITH` and degrading to no table. Escape quotes in the question. |
+| `components/report.tsx` | `"use client"`. The views, the KPI band, null labelling, and the agent panel. Composes library components; contains no chart code. |
+| `app/layout.tsx` | Import `globals.css` once; set the `NEUTRAL.wash` background above. |
+| `app/page.tsx` | Render the report. Nothing else. |
+| `next.config.ts` | `output: "standalone"`, and `transpilePackages: ["echarts", "echarts-for-react"]` — the wrapper is CJS and the interop fails on the server render path without it. |
+| `tsconfig.json` | `paths: {"@/*": ["./*"]}`, `strict`. Expect `next build` to rewrite `jsx` to `react-jsx` and add `.next` types; that rewrite is normal, not a defect. |
+| `app.yml` | The App Runtime service spec. No credential: the mounted OAuth token is what `lib/snowflake.ts` prefers when it exists. |
+
+**Auth in `lib/snowflake.ts`: two paths, probed in this order.** The mounted OAuth token at
+`/snowflake/session/token`, present when running as an App Runtime service and re-read per
+request because it rotates; then `SNOWFLAKE_PAT` from the environment, which is the local
+path. Both hit the same endpoint and differ only in
+`X-Snowflake-Authorization-Token-Type` (`OAUTH` vs `PROGRAMMATIC_ACCESS_TOKEN`). Surface
+which path was used in the UI — on a local run "it returned rows" is not evidence the
+deployed path works, and the two are easy to confuse when both succeed. A connection
+already using `authenticator = "programmatic_access_token"` has a token file to point
+`SNOWFLAKE_PAT` at, so a local run needs no new credential minted.
 
 **`lib/queries.ts` has a required shape, not just a required name.** Every dataset must carry
 a `sql:` property holding a backtick template literal, and every object reference must

@@ -255,16 +255,30 @@ def test_component_aggregation_is_documented() -> None:
           "Do not pre-aggregate" in r)
 
     # Derived from the source, so the doc cannot drift from the libraries.
+    #
+    # Two ways a component can aggregate, and the first version of this detector
+    # only knew about one. `rollup()` and `collapseTail()` are the explicit route;
+    # `Heatmap` and `MixBar` instead accumulate in place into a Map with
+    # `set(k, (get(k) ?? 0) + v)`, which is the same behaviour by a different
+    # spelling. Missing the second route is why the table claimed for a while
+    # that those two aggregate in Streamlit but not in React.
     tsx = src("assets", "react_ui", "charts.tsx")
+    accumulates = re.compile(r"\.set\(\s*[^,]+,\s*\(\s*\w+\.get\([^)]*\)\s*\?\?\s*0\s*\)\s*\+")
     aggregating = set()
     for block in re.split(r"(?=^export function )", tsx, flags=re.M):
         m = re.match(r"export function (\w+)", block)
-        if m and ("rollup(" in block or "collapseTail(" in block):
+        if not m:
+            continue
+        if "rollup(" in block or "collapseTail(" in block or accumulates.search(block):
             aggregating.add(m.group(1))
     # `count` is a formatter, not a chart.
     aggregating.discard("count")
     check("charts.tsx has components that aggregate internally", bool(aggregating),
           ", ".join(sorted(aggregating)))
+    for comp in ("Heatmap", "MixBar"):
+        check(f"  the in-place accumulator {comp} is detected",
+              comp in aggregating,
+              "in-place accumulation" if comp in aggregating else "MISSED")
     for comp in sorted(aggregating):
         row = re.search(rf"^\|[^|]*\|\s*`{comp}`[^|]*\|([^|]*)\|", r, re.M)
         check(f"  {comp} is marked as aggregating",
@@ -410,7 +424,29 @@ def test_reporting_view_count_is_derived() -> None:
 # --------------------------------------------------------------------------
 # D8 -- nothing stopped a composed page restyling the locked libraries
 # --------------------------------------------------------------------------
-def _colour_literals(text: str) -> set[str]:
+def _strip_comments(text: str, path: str | None) -> str:
+    """Remove comments so a hex *mentioned in prose* is not read as a violation.
+
+    Without this the guard fails on a composed file whose comment merely explains
+    which colour was rejected and why -- which is the comment most likely to be
+    written right after the guard fires. That cost two suite runs on a file that
+    used no colour outside the palette.
+
+    The `#` case needs care: in TOML and Python a colour literal and a comment
+    both start with `#`, so stripping from the first `#` to end of line would
+    delete the very literals this scan exists to find. A `#` therefore opens a
+    comment only when it is *not* followed by six hex digits.
+    """
+    if path and path.endswith((".ts", ".tsx", ".css", ".mjs")):
+        text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+        return re.sub(r"//[^\n]*", " ", text)
+    if path and path.endswith((".py", ".toml")):
+        return re.sub(r"#(?![0-9A-Fa-f]{6}\b)[^\n]*", " ", text)
+    return text
+
+
+def _colour_literals(text: str, path: str | None = None) -> set[str]:
+    text = _strip_comments(text, path)
     hexes = {h.upper() for h in re.findall(r"#[0-9A-Fa-f]{6}\b", text)}
     rgbas = {re.sub(r"\s+", "", r).lower() for r in re.findall(r"rgba\([^)]*\)", text)}
     return hexes | rgbas
@@ -426,6 +462,69 @@ def library_palette() -> set[str]:
                     with open(os.path.join(dirpath, name), encoding="utf-8") as fh:
                         palette |= _colour_literals(fh.read())
     return palette
+
+
+def test_composed_react_obeys_its_runtime_contract() -> None:
+    """D20/D21/D22: three defects a composed React app hits every run.
+
+    All three are silent. The layout one fails the build naming a path that exists
+    nowhere; the other two produce an app that starts, serves and looks healthy
+    while being wrong -- dark-on-dark on a dark-mode machine, and truncated result
+    sets that understate every total.
+
+    Skipped rather than failed when no app is composed, so a clone still passes.
+    """
+    print("D20/D21/D22: the composed React app obeys its runtime contract")
+    base = os.path.join(ROOT, "pipeline", "app_react")
+    if not os.path.isdir(base):
+        print("       (no composed React app present -- nothing to scan)")
+        return
+
+    def here(*parts: str) -> str:
+        return os.path.join(base, *parts)
+
+    def want(label: str, ok: bool, hint: str) -> None:
+        # Hints are remediation, so they belong on a failure only.
+        check(label, ok, "" if ok else hint)
+
+    # D20 -- the library's own imports only resolve from lib/.
+    for name in ("theme.ts", "charts.tsx", "ui.tsx"):
+        want(f"  the library lives in lib/ ({name})",
+             os.path.isfile(here("lib", name)),
+             "expected pipeline/app_react/lib/" + name)
+        want(f"  and not at the app root ({name})",
+             not os.path.isfile(here(name)),
+             "a root copy shadows the lib/ one")
+
+    # D21 -- globals.css defines no colours, so the page needs a background from
+    # the palette or it inherits the OS dark mode.
+    layout = ""
+    for candidate in (here("app", "layout.tsx"), here("app", "layout.jsx")):
+        if os.path.isfile(candidate):
+            with open(candidate, encoding="utf-8") as fh:
+                layout = fh.read()
+            break
+    want("  a root layout exists", bool(layout), "no app/layout.tsx")
+    if layout:
+        want("  the page background comes from the theme, not a literal",
+             "NEUTRAL.wash" in layout,
+             "set <body style={{ background: NEUTRAL.wash }}>")
+
+    # D22 -- the REST API paginates and the POST carries only partition 0.
+    client = ""
+    for candidate in (here("lib", "snowflake.ts"), here("lib", "snowflake.tsx")):
+        if os.path.isfile(candidate):
+            with open(candidate, encoding="utf-8") as fh:
+                client = fh.read()
+            break
+    want("  a Snowflake client exists", bool(client), "no lib/snowflake.ts")
+    if client:
+        want("  it follows result partitions",
+             "partitionInfo" in client and "partition=" in client,
+             "reads only the first partition -- totals will be silently short")
+        want("  it coerces numeric columns",
+             "Number(" in client,
+             "the REST API returns strings; aggregation would concatenate")
 
 
 def test_composed_app_introduces_no_new_colour() -> None:
@@ -453,7 +552,7 @@ def test_composed_app_introduces_no_new_colour() -> None:
                     continue
                 path = os.path.join(dirpath, name)
                 with open(path, encoding="utf-8", errors="replace") as fh:
-                    found = _colour_literals(fh.read())
+                    found = _colour_literals(fh.read(), path)
                 scanned += 1
                 for c in sorted(found - palette):
                     offenders.append("%s: %s" % (os.path.relpath(path, ROOT), c))
@@ -467,6 +566,20 @@ def test_composed_app_introduces_no_new_colour() -> None:
     planted = _colour_literals('textColor = "#1A1A2E"') - palette
     check("a colour outside the palette would be caught", bool(planted),
           str(sorted(planted)))
+
+    # Comment-stripping must not blunt the guard. Prove both directions on the
+    # same hex: ignored in prose, still caught in code. Without the second half,
+    # a stripper that deleted everything would pass the first half happily.
+    prose_py = _colour_literals('# rejected #1A1A2E as off-palette', "x.toml") - palette
+    check("a colour named only in a comment is ignored", not prose_py,
+          str(sorted(prose_py)))
+    code_py = _colour_literals('textColor = "#1A1A2E"  # still a violation', "x.toml") - palette
+    check("the same colour in code is still caught", bool(code_py),
+          str(sorted(code_py)))
+    prose_ts = _colour_literals("/* rejected #1A1A2E */\n// and #1A1A2E", "x.ts") - palette
+    check("a TS comment colour is ignored", not prose_ts, str(sorted(prose_ts)))
+    code_ts = _colour_literals('const c = "#1A1A2E" // kept', "x.ts") - palette
+    check("a TS code colour is still caught", bool(code_ts), str(sorted(code_ts)))
 
 
 # --------------------------------------------------------------------------
@@ -585,6 +698,7 @@ def main() -> int:
         test_schema_answer_is_not_silently_discarded,
         test_reporting_view_count_is_derived,
         test_composed_app_introduces_no_new_colour,
+        test_composed_react_obeys_its_runtime_contract,
         test_composed_react_typechecks,
         test_app_source_reported_in_every_deploy_mode,
         test_react_scaffold_ships,

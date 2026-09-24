@@ -94,6 +94,18 @@ Each card carries a delta against the prior comparable period and a twelve-point
 when a date dimension exists. `higher_is_better` follows `kind_of()`: costs and returns are
 inverted, everything else is not.
 
+**A sparkline needs the measure to exist in the period frame, which is not implied by the
+measure existing.** The band is selected by magnitude across all `RPT_` views, so a card
+can legitimately carry a measure that the *time* frame does not expose. On the reference
+model `SALES_QUANTITY_TOTAL` is the second card by the `kind_of()` rule, but
+`RPT_SALES_BY_PERIOD` has no quantity column at all — only `RPT_SALES_BY_PRODUCT` carries
+it, and that view has no time column. So that one tile has a correct value and no
+sparkline. Check the column is present in the period frame before promising a trend, and
+leave the sparkline off when it is not. Do not substitute a different measure's series to
+fill the space, and do not drop the card: the value is real even when its history is not
+available. Say so in the Provenance view rather than leaving a viewer to wonder why three
+tiles have a line and one does not.
+
 ## Chart selection
 
 Match on data shape. The left column is the only question to ask.
@@ -104,8 +116,8 @@ Match on data shape. The left column is the only question to ask.
 | Ranked categories, one measure | `RankedBar` / `ranked_bar` | **Yes — groups and folds the tail** | Horizontal. Bars beat angles for comparison. |
 | Two measures over time, gap matters | `AreaGap` / `area_gap` | No | Order is load-bearing: the fill goes to the previous series. `AreaGap` also requires `lowerLabel`, `upperLabel` and `gapLabel` — all three non-optional. |
 | Period-to-period change, one measure | `Waterfall` / `waterfall` | **Yes — groups** | See the partial-period rule below. |
-| Category by period, one measure | `Heatmap` / `heatmap` | React: no · Streamlit: **yes — groups** | Needs an explicit legend range or it renders as a bare gradient. |
-| Part-to-whole over time | `MixBar` / `mix_bar` | React: no · Streamlit: **yes — groups** | Stacked to 100%. |
+| Category by period, one measure | `Heatmap` / `heatmap` | **Yes — groups, both libraries** | Needs an explicit legend range or it renders as a bare gradient. |
+| Part-to-whole over time | `MixBar` / `mix_bar` | **Yes — groups, both libraries** | Stacked to 100%. |
 | Concentration in a ranked set | `Pareto` / `pareto` | **Yes — groups** | Cumulative axis; the 80% line only when in range. |
 | Two-level hierarchy, one measure | `Treemap` / `treemap` | No | Key nodes by full path or repeated children merge. |
 | Three-plus-level hierarchy | `Sunburst` / `sunburst` | No | Same keying rule. |
@@ -119,9 +131,14 @@ libraries. Pre-rolling and pre-folding before handing rows to those three nests 
 `Other (N)` inside another `Other (N)`. The column above is the authority; it was derived by
 reading the component source, which is what the first composition had to do.
 
-Note the React and Streamlit columns genuinely differ for `Heatmap` and `MixBar`. That
-asymmetry is not deliberate design — it is worth knowing before assuming one library's
-behaviour from the other's.
+Note the React and Streamlit columns agree throughout. An earlier version of this table
+claimed `Heatmap` and `MixBar` aggregate in Streamlit but not in React; that was wrong.
+Both React components accumulate into a cell map with `+=` — the `cells.set` calls in
+`charts.tsx` — exactly as their Streamlit counterparts do. The error was harmless in one
+direction, since passing raw rows to something that groups is correct either way, but it
+would have justified pre-aggregating for React, which nests an `Other (N)` inside another
+`Other (N)`. Read the component source when this column matters; that is how both the
+original column and this correction were derived.
 
 Never a pie or donut for share of total. `RankedBar` answers the same question more
 accurately, and the library deliberately ships no pie.
@@ -172,6 +189,30 @@ Each of these exists because its absence produced a visible bug in the reference
 
 These are not judgement calls. Both cost a working app in the reference build, and both
 pass every local test.
+
+- **The Snowflake SQL REST API paginates, and the first response is not the whole
+  result.** This bites the React surface every run, because `package.template.json`
+  pins no Snowflake driver — so the composed `lib/snowflake.ts` talks to
+  `/api/v2/statements` over `fetch`, and a `POST` returns only the first partition.
+  Read `resultSetMetaData.partitionInfo` and fetch
+  `/api/v2/statements/{statementHandle}?partition=N` for every partition after the
+  first. Measured: `RPT_SALES_DETAIL` came back as **812 of 3,198 rows**, which
+  understated every total on the Mix page while the app looked entirely healthy —
+  no error, no empty state, just quietly wrong numbers. The cheap catch is the
+  tie-back rule below: sum the detail frame and assert it equals the KPI. That is
+  what surfaced it.
+
+- **Do not name the agent bridge from memory.** The procedure is generated with the
+  run's prefix and is not the name composition tends to guess: on the reference
+  build it is `ASK_RT6_ANALYST(QUESTION, CONTEXT)`, not `<PREFIX>_ASK_AGENT`. Read
+  it rather than assuming, or the app's chat panel fails at the first question with
+  "unknown function":
+
+  ```sql
+  SELECT PROCEDURE_NAME, ARGUMENT_SIGNATURE
+    FROM <DB>.INFORMATION_SCHEMA.PROCEDURES
+   WHERE PROCEDURE_SCHEMA = 'ANALYTICS';
+  ```
 
 - **Never hardcode a bind placeholder.** `snowflake-connector-python` defaults to
   `paramstyle = "pyformat"`, so `%s` works from a REPL, from a script, and from `data.py`
