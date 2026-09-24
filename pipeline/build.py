@@ -345,10 +345,15 @@ def run_app_deploy(sql_path: str, connection: str) -> tuple[bool, str]:
         "metrics.py",      # formatting and safe arithmetic
         "pyproject.toml",  # pinned deps -- the fix for the 1.22 outage
     ]
-    pkg = ["bim_ui/__init__.py", "bim_ui/compat.py", "bim_ui/filters.py"]
-    config = [".streamlit/config.toml"]
+    pkg = ["bim_ui/%s" % m for m in STREAMLIT_LIB_MODULES]
+    # Not `config`: that is the name of the module imported at the top of this file,
+    # and shadowing it here raised AttributeError thirty lines later, at
+    # config.render_sql -- after the compute pool, the stage and every PUT had already
+    # succeeded. So the phase failed having done nearly all its work, and the error
+    # named a list, with nothing in it pointing at deployment.
+    config_files = [".streamlit/config.toml"]
 
-    missing = [f for f in root + pkg + config
+    missing = [f for f in root + pkg + config_files
                if not os.path.exists(os.path.join(app_dir, f))]
     if missing:
         return False, f"app source incomplete, missing: {', '.join(missing)}"
@@ -364,7 +369,7 @@ def run_app_deploy(sql_path: str, connection: str) -> tuple[bool, str]:
     subprocess.run(["snow", "sql", "-c", connection, "-q", f"REMOVE {stage}/"],
                    capture_output=True, text=True)
 
-    for rel in root + pkg + config:
+    for rel in root + pkg + config_files:
         src = os.path.join(app_dir, rel)
         subdir = os.path.dirname(rel)
         dest = f"{stage}/{subdir}/" if subdir else f"{stage}/"
@@ -524,9 +529,32 @@ def kb_row_count(connection: str) -> int:
         return -1
 
 
+def _streamlit_lib_modules() -> list[str]:
+    """Every module in the locked Streamlit library, read from the library itself.
+
+    Derived rather than listed, because a hand-written list drifted and the drift was
+    invisible until someone opened the deployed app. `assets/streamlit_ui/__init__.py`
+    does `from . import charts, compat, filters, metrics, ui`, but only __init__,
+    compat and filters were being staged -- so the deployed app raised ImportError on
+    its first line while SHOW STREAMLITS looked perfectly healthy.
+
+    The comment on the upload list was right that globbing the *app* directory is
+    dangerous, since it would sweep up superseded files. This is a different thing: a
+    directory whose contents are exactly the contract.
+    """
+    lib = os.path.join(SKILL_ROOT, "assets", "streamlit_ui")
+    mods = sorted(f for f in os.listdir(lib) if f.endswith(".py"))
+    if "__init__.py" in mods:                    # first, so the package imports cleanly
+        mods.remove("__init__.py")
+        mods.insert(0, "__init__.py")
+    return mods
+
+
+STREAMLIT_LIB_MODULES = _streamlit_lib_modules()
+
 STREAMLIT_SOURCE = [
     "app.py", "data.py", "pages_impl.py", "metrics.py", "pyproject.toml",
-    "bim_ui/__init__.py", "bim_ui/compat.py", "bim_ui/filters.py",
+    *("bim_ui/%s" % m for m in STREAMLIT_LIB_MODULES),
     ".streamlit/config.toml",
 ]
 # lib/queries.ts is listed because verify_deployment.py enforces a specific shape
@@ -723,10 +751,12 @@ def main(argv=None) -> int:
                     help="All four paths")
     ap.add_argument("--deploy",
                     choices=["all", "both", "streamlit", "react", "none", "local", "skip"],
-                    default="all",
-                    help="Which dashboards to deploy to Snowflake: 'all'/'both' (default), "
-                         "'streamlit' (deploy Streamlit, React local), 'react', "
-                         "or 'none'/'local' (build backend on Snowflake, run dashboards locally)")
+                    default="none",
+                    help="Which dashboards to deploy to Snowflake: 'none'/'local' "
+                         "(default -- backend on Snowflake, dashboards run locally), "
+                         "'streamlit', 'react', or 'all'/'both'. Deploying creates a "
+                         "compute pool, a STREAMLIT and an APPLICATION SERVICE, so it "
+                         "is always an explicit choice")
     # Accepted because it is the name anyone looks for first. Without it the
     # obvious guess is an argparse error, which reads as "the pipeline cannot do
     # this" rather than "that flag is spelled differently".

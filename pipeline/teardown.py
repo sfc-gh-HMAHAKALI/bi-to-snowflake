@@ -34,6 +34,21 @@ import config
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def already_gone(out: str) -> bool:
+    """Whether a failed DROP failed only because the thing was already absent.
+
+    `IF EXISTS` protects the leaf object, not the path to it. Once the database has
+    been dropped, a qualified `DROP VIEW IF EXISTS DB.SCHEMA.V` does not quietly
+    succeed -- it cannot resolve DB, and Snowflake raises 002003. On a second
+    teardown pass that is the expected outcome for most statements, so it must be
+    reported as "already gone" rather than counted as a failure.
+    """
+    low = (out or "").lower()
+    return ("does not exist or not authorized" in low
+            or "does not exist or is not authorized" in low
+            or "002003" in low)
+
+
 def sql(statement: str, connection: str, execute: bool) -> tuple[bool, str]:
     if not execute:
         return True, "(dry run)"
@@ -111,6 +126,17 @@ def plan_statements(db: str, kb_db: str, kb_schema: str, analytics: str,
     if drop_databases:
         s.append((f"Database {db}", f"DROP DATABASE IF EXISTS {db}"))
         s.append((f"Database {kb_db}", f"DROP DATABASE IF EXISTS {kb_db}"))
+
+    # 8. The security role, last and unconditionally.
+    #
+    # Account-level, so it is invisible to every INFORMATION_SCHEMA sweep above and
+    # survived two --execute --drop-databases passes before being dropped by hand.
+    # A role is exactly the kind of thing a "get me back to clean" step must not
+    # leave behind: it is granted to people, it outlives the databases it was made
+    # for, and the next run's CREATE ROLE IF NOT EXISTS silently adopts it along
+    # with whatever grants it accumulated.
+    s.append((f"Security role {naming.security_role}",
+              f"DROP ROLE IF EXISTS {naming.security_role}"))
     return s
 
 
@@ -171,25 +197,45 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 74)
 
     failed = 0
+    absent = 0
     for i, (label, stmt) in enumerate(expanded, 1):
         if not stmt:
             print(f"{i:4}. {label}")
             continue
         ok, out = sql(stmt, a.connection, a.execute)
-        mark = " " if ok else "!"
-        print(f"{i:4}. {mark} {label}")
-        if not ok:
-            failed += 1
-            first = (out.splitlines() or [""])[0][:130]
-            print(f"       {first}")
+        if ok:
+            print(f"{i:4}.   {label}")
+            continue
+        # A second pass over an already-clean account is the normal case, not a
+        # problem: the first pass removed the object, so the parent database is now
+        # gone and the qualified DROP cannot resolve it. Reporting that as a failure
+        # made a successful teardown print "7 succeeded, 11 failed", which reads as
+        # something badly wrong and sent a reader looking for a fault that was not
+        # there. IF EXISTS only protects the leaf; it does not help when the
+        # database or schema in the path has already been dropped.
+        if already_gone(out):
+            absent += 1
+            print(f"{i:4}. - {label}  (already gone)")
+            continue
+        failed += 1
+        first = (out.splitlines() or [""])[0][:130]
+        print(f"{i:4}. ! {label}")
+        print(f"       {first}")
 
     print("=" * 74)
     if not a.execute:
         print(f"{len(expanded)} statements planned. Re-run with --execute to apply.")
         return 0
-    print(f"Done. {len(expanded) - failed} succeeded, {failed} failed.")
-    # A failure here is usually a missing object, which is fine, or a dependency that
-    # a second pass will clear. Re-running is always safe.
+    dropped = len(expanded) - failed - absent
+    parts = [f"{dropped} dropped"]
+    if absent:
+        parts.append(f"{absent} already gone")
+    if failed:
+        parts.append(f"{failed} failed")
+    print("Done. " + ", ".join(parts) + ".")
+    # Only a genuine failure is worth a retry hint. "Already gone" needs no action,
+    # and suggesting a re-run for it invited exactly the second pass whose output
+    # then looked alarming for the same reason.
     if failed:
         print("Re-running is safe and often clears dependency-ordering failures.")
     return 0

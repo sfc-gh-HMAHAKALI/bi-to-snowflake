@@ -6,6 +6,30 @@ have already read, so the counts shown are real rather than promised.
 
 Never skip to the build. A user who wanted one semantic view does not want two dashboards.
 
+## Naming parameters are not answers to the wizard
+
+**A request that supplies a database, KB database, prefix or connection has answered
+*where things are named*. It has not answered *what to build* or *where it is hosted*.**
+Run both rounds and the confirmation gate anyway.
+
+This has gone wrong in a real run and it was expensive. The request named a database,
+a KB database, a prefix and a connection, and said "including building and deploying
+the React app". That was read as "deploy to Snowflake" when it meant "get the React
+app built and running" — so `--deploy all` ran unasked, created a compute pool, a
+`STREAMLIT` object and an `APPLICATION SERVICE`, and spent about 290 seconds of remote
+build time on infrastructure nobody had asked for. All of it then had to be torn down.
+
+The failure was not a missing rule; it was treating supplied parameters as consent for
+adjacent decisions. So:
+
+> The only wizard question a user's earlier message can pre-answer is one they answered
+> **in the same terms the wizard uses**. "Deploy the React app" is not an answer to
+> "where should the dashboards be hosted?", because it does not distinguish running it
+> locally from creating an App Runtime service. If a choice costs money, creates
+> account-level objects, or is hard to reverse, ask — even if you believe you know.
+
+Deploying is all three.
+
 ## Round 1 -- the source
 
 ```
@@ -145,12 +169,45 @@ cannot see the report's filter state is a different product. Path 4 builds them 
 
 | Deploy selection | `--deploy` flag | What deploys to Snowflake | What runs locally |
 |---|---|---|---|
+| Both local / Nothing deployed **(default)** | `--deploy none` (or `local`) | Backend only (views, semantic view, agent) | Streamlit (`streamlit run pipeline/app_streamlit/app.py`) and React (`cd pipeline/app_react && npm run dev`) |
 | Streamlit deployed, React on localhost | `--deploy streamlit` | Streamlit report (container runtime) | React (`cd pipeline/app_react && npm install && npm run dev`) |
 | Both deployed to Snowflake | `--deploy all` | Streamlit + React App Runtime service | None needed |
-| Both local / Nothing deployed | `--deploy none` (or `local`) | Backend only (views, semantic view, agent) | Streamlit (`streamlit run pipeline/app_streamlit/app.py`) and React (`cd pipeline/app_react && npm run dev`) |
 
-If omitted, `--deploy` defaults to `all`. `--skip-deploy` is accepted as an alias for
-`--deploy none`.
+**`--deploy` defaults to `none`.** Deploying creates a compute pool, a `STREAMLIT`
+object and an `APPLICATION SERVICE`; it costs money, it is the slowest part of the
+build, and it is the least reversible. So it is never the default and always an
+explicit choice. `--skip-deploy` is accepted as an alias for `--deploy none`.
+
+This used to default to `all` while this table marked a different row "Recommended" —
+the default and the recommendation disagreed, and the default was the option hardest to
+undo. Local-first is also simply better for this workflow: a React app on localhost
+renders identically and starts in seconds, which is what anyone iterating on a
+composition actually wants.
+
+### A first run cannot deploy in one command
+
+`--deploy all` on a fresh model **cannot satisfy its own preflight**, and this is not a
+bug to work around — it is inherent. The preflight refuses to start when
+`pipeline/app_react/` and `pipeline/app_streamlit/` are missing, but composing those
+needs `pipeline/out/bim_inventory.json`, which the `bridge` phase writes near the end of
+the backend build. The app source cannot exist before the run that produces its input.
+
+So the run shape is three steps, and the third is opt-in:
+
+```bash
+# 1. Backend, through the bridge phase. This is the whole build for most purposes.
+python3 pipeline/build.py --extract "<model>" --all --deploy none
+
+# 2. Compose both surfaces against the measured inventory (see composition-rules.md).
+#    Nothing to run here -- this is the authoring step.
+
+# 3. Only if the user asked for hosting on Snowflake:
+python3 pipeline/build.py --paths 4 --deploy streamlit --skip-physical
+```
+
+Step 3 takes `--skip-physical` because the tables already exist and rebuilding them
+would discard the catalog comments and tags path 1 wrote onto them.
+
 
 **Local hosting is not local data.** `--deploy` only decides where the two apps are
 *hosted*. The semantic view, row access policy, Cortex Search, the agent, the SQL
@@ -171,8 +228,31 @@ libraries. Write it to the paths the deploy phases read, or they will not find i
 
 | Surface | Compose into | Must contain |
 |---|---|---|
-| Streamlit | `pipeline/app_streamlit/` | `app.py`, `data.py`, `pages_impl.py`, `metrics.py`, `pyproject.toml`, `bim_ui/{__init__,compat,filters}.py`, `.streamlit/config.toml` |
+| Streamlit | `pipeline/app_streamlit/` | `app.py`, `data.py`, `pages_impl.py`, `metrics.py`, `pyproject.toml`, `bim_ui/` (all six library modules), `.streamlit/config.toml` |
 | React | `pipeline/app_react/` | `app.yml`, `package.json`, `lib/queries.ts`, `lib/theme.ts`, `lib/charts.tsx`, `lib/ui.tsx`, `tailwind.config.ts`, `postcss.config.mjs`, `app/globals.css`, plus the Next.js tree |
+
+**The Streamlit layout, which is as fixed as the React one.** `bim_ui/` is a *verbatim
+copy* of `assets/streamlit_ui/`; the files beside it are the page's own layer. Both a
+root `metrics.py` and a `bim_ui/metrics.py` exist and they are different files — this
+caught a real run out, and two runs inferring it differently is exactly the variance the
+locked-library rule exists to remove.
+
+| Path | What it is | Comes from |
+|---|---|---|
+| `bim_ui/__init__.py` | Re-exports the library surface. Does `from . import charts, compat, filters, metrics, ui` — so **all six modules must be present** or the app raises `ImportError` on its first line. | copy of `assets/streamlit_ui/` |
+| `bim_ui/{charts,compat,filters,metrics,ui}.py` | The locked component library. Never edited, never restyled, never partially copied. | copy of `assets/streamlit_ui/` |
+| `metrics.py` (root) | The **page's** formatting and safe arithmetic. A different file from `bim_ui/metrics.py`, and not a substitute for it. | written per model |
+| `app.py` | Entry point and page registration. | written per model |
+| `data.py` | Every query, one function per dataset. | written per model |
+| `pages_impl.py` | Rendering, calling into `bim_ui`. | written per model |
+| `.streamlit/config.toml` | Theme. Must carry no off-palette colour. | written per model |
+
+Copying only part of `bim_ui/` fails in the worst available way: the `STREAMLIT` object
+is created, `SHOW STREAMLITS` looks healthy, and it breaks only when a person opens it.
+The upload list in `run_app_deploy` is now derived from the library directory rather
+than hand-written, so a module added to `assets/streamlit_ui/` is staged automatically —
+but a composition that copies three of six files is still wrong and the preflight is
+what catches it.
 
 **The React component library goes in `lib/`, not the app root.** This is fixed by the
 library's own imports and is not a matter of taste: `charts.tsx` imports

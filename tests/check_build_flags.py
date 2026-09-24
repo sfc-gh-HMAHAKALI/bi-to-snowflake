@@ -2,6 +2,9 @@
 composed-app preflight."""
 
 import os
+import re
+import inspect
+import ast
 import subprocess
 import sys
 
@@ -354,6 +357,185 @@ def test_the_digest_reports_only_what_the_parse_found() -> None:
     print("  the digest reports only parsed facts, and omits sections it has no data for")
 
 
+def test_run_app_deploy_does_not_shadow_the_config_module() -> None:
+    """A local name must not shadow an imported module it later calls.
+
+    `config = [".streamlit/config.toml"]` shadowed the `config` module imported at the
+    top of build.py, and the shadow bit about thirty lines later at
+    `config.render_sql(...)` with `AttributeError: 'list' object has no attribute
+    'render_sql'`. The damage is in the timing: the compute pool, the stage and all
+    nine PUTs had already succeeded, so the phase failed having done nearly all its
+    work, and the error named a list with nothing in it pointing at deployment.
+
+    Checked with the AST rather than a grep, so any local rebinding of an imported
+    module name in this file fails, not just this one spelling of it.
+    """
+    path = os.path.join(ROOT, "pipeline", "build.py")
+    tree = ast.parse(open(path, encoding="utf-8").read())
+
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                imported.add((a.asname or a.name).split(".")[0])
+
+    offenders = []
+    for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+        # Does this function also *call* an attribute of the name it rebinds?
+        called = {n.value.id for n in ast.walk(fn)
+                  if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)}
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if isinstance(t, ast.Name) and t.id in imported and t.id in called:
+                        offenders.append("%s() rebinds imported module %r and still "
+                                         "calls %s.<attr>" % (fn.name, t.id, t.id))
+    assert not offenders, "module shadowing in build.py:\n  " + "\n  ".join(offenders)
+    print("  no function shadows an imported module it goes on to call")
+
+
+def test_the_streamlit_deploy_stages_the_whole_locked_library() -> None:
+    """Every module the library's __init__ imports must reach the stage.
+
+    `assets/streamlit_ui/__init__.py` does `from . import charts, compat, filters,
+    metrics, ui`, but only __init__, compat and filters were being staged -- and
+    STREAMLIT_SOURCE, which drives the preflight, listed the same three. So the
+    preflight passed, the STREAMLIT object was created, SHOW STREAMLITS looked
+    healthy, and the app raised ImportError on its first line when somebody opened it.
+
+    Both lists must now be derived from the library directory, so adding a module
+    cannot leave them behind.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    try:
+        import build as B
+    finally:
+        sys.path.pop(0)
+
+    lib = os.path.join(ROOT, "assets", "streamlit_ui")
+    on_disk = sorted(f for f in os.listdir(lib) if f.endswith(".py"))
+    assert sorted(B.STREAMLIT_LIB_MODULES) == on_disk, (
+        "the library module list does not match the library: %s vs %s"
+        % (sorted(B.STREAMLIT_LIB_MODULES), on_disk))
+    assert B.STREAMLIT_LIB_MODULES[0] == "__init__.py", \
+        "__init__.py must be staged first so the package imports cleanly"
+
+    # Whatever __init__ imports must be in the list.
+    init = open(os.path.join(lib, "__init__.py"), encoding="utf-8").read()
+    m = re.search(r"from \.\s+import\s+([^\n#]+)", init)
+    assert m, "could not find the `from . import ...` line in the library __init__"
+    needed = ["%s.py" % n.strip() for n in m.group(1).split(",") if n.strip()]
+    for mod in needed:
+        assert mod in B.STREAMLIT_LIB_MODULES, \
+            "__init__ imports %s but it is not staged -- the deployed app will ImportError" % mod
+        assert "bim_ui/%s" % mod in B.STREAMLIT_SOURCE, \
+            "%s is staged but the preflight does not require it" % mod
+
+    # And the deploy function must build its upload list from the derived one.
+    src = inspect.getsource(B.run_app_deploy)
+    assert "STREAMLIT_LIB_MODULES" in src, \
+        "run_app_deploy hand-writes its bim_ui list again; it will drift again"
+    print("  the Streamlit deploy stages all %d library modules, derived not listed"
+          % len(B.STREAMLIT_LIB_MODULES))
+
+
+def test_deploying_is_never_the_default() -> None:
+    """--deploy must default to none, and the docs must agree with the code.
+
+    It defaulted to `all` while wizard.md marked a different row "Recommended" -- the
+    default and the recommendation disagreed, and the default was the option that
+    creates a compute pool, a STREAMLIT and an APPLICATION SERVICE, costs money and is
+    hardest to reverse. A real run deployed all of that unasked and had to tear it down.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    try:
+        import build as B
+    finally:
+        sys.path.pop(0)
+
+    src = open(os.path.join(ROOT, "pipeline", "build.py"), encoding="utf-8").read()
+    i = src.index('ap.add_argument("--deploy"')
+    decl = src[i:src.index("ap.add_argument", i + 10)]
+    assert 'default="none"' in decl, \
+        "--deploy does not default to none; deploying must be an explicit choice"
+
+    # A default plan must create no app surfaces at all.
+    plan = B.resolve({1, 2, 3, 4}, True, True, deploy="none")
+    assert not [p for p in plan if p.kind in ("app", "react")], \
+        "the default plan still contains deploy phases"
+
+    doc = open(os.path.join(ROOT, "references", "wizard.md"), encoding="utf-8").read()
+    assert "defaults to `none`" in doc, "wizard.md does not document the none default"
+    assert "defaults to `all`" not in doc, \
+        "wizard.md still claims --deploy defaults to all"
+    print("  --deploy defaults to none, in the code and in the wizard")
+
+
+def test_the_wizard_forbids_treating_parameters_as_consent() -> None:
+    """Supplying a database name is not consent to deploy.
+
+    The rule that was missing. A request naming a database, prefix and connection was
+    read as having pre-answered the wizard, including the hosting question it never
+    mentioned. wizard.md said "Never skip to the build" but only described what to ask,
+    never when the wizard may be bypassed -- which is never.
+    """
+    doc = open(os.path.join(ROOT, "references", "wizard.md"), encoding="utf-8").read()
+    assert "Naming parameters are not answers to the wizard" in doc, \
+        "wizard.md has no rule about parameters not implying consent"
+    for idea in ("same terms the wizard uses", "hard to reverse"):
+        assert idea in doc, "the rule does not explain %r" % idea
+    print("  the wizard states that supplied parameters do not pre-answer it")
+
+
+def test_the_three_step_run_shape_is_documented() -> None:
+    """A first run cannot deploy in one command, and the docs must say so.
+
+    The preflight needs composed app source; composing it needs
+    pipeline/out/bim_inventory.json, which the bridge phase writes late in the backend
+    build. So `--deploy all` on a fresh model can never satisfy its own preflight, and
+    the real sequence is backend, compose, then deploy. This had to be worked out by
+    reading preflight() -- nothing documented it.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    try:
+        import build as B
+    finally:
+        sys.path.pop(0)
+
+    # The dependency that makes it inherent: the bridge phase runs, and the deploy
+    # phases come after it, yet the preflight gates on app source before anything runs.
+    plan = B.resolve({1, 2, 3, 4}, True, True, deploy="all")
+    keys = [p.key for p in plan]
+    assert "bridge" in keys, "the inventory-producing phase is missing from a full plan"
+    deploys = [i for i, k in enumerate(keys) if plan[i].kind in ("app", "react")]
+    assert deploys and min(deploys) > keys.index("bridge"), \
+        "deploy phases no longer come after the bridge; re-check this reasoning"
+
+    doc = open(os.path.join(ROOT, "references", "wizard.md"), encoding="utf-8").read()
+    assert "cannot satisfy its own preflight" in doc, \
+        "wizard.md does not explain that a first run cannot deploy in one command"
+    assert "--skip-physical" in doc, \
+        "the three-step shape omits --skip-physical, which step 3 needs"
+    print("  the three-step run shape is documented, with why step 3 is separate")
+
+
+def test_the_streamlit_layout_is_pinned_like_the_react_one() -> None:
+    """bim_ui/ is a verbatim copy, and root metrics.py is a different file.
+
+    The React layout was pinned precisely and the Streamlit one was not, even though
+    both a root metrics.py and a bim_ui/metrics.py exist and must differ. That had to
+    be inferred, and two runs will infer it differently.
+    """
+    doc = open(os.path.join(ROOT, "references", "wizard.md"), encoding="utf-8").read()
+    assert "verbatim" in doc and "bim_ui/" in doc, \
+        "wizard.md does not say bim_ui/ is a verbatim copy of the library"
+    assert "bim_ui/metrics.py" in doc and "A different file" in doc, \
+        "wizard.md does not distinguish root metrics.py from bim_ui/metrics.py"
+    assert "all six modules must be present" in doc.replace("**", ""), \
+        "wizard.md does not state that a partial bim_ui/ copy breaks the app"
+    print("  the Streamlit layout is pinned, including the two metrics.py files")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -364,3 +546,9 @@ if __name__ == "__main__":
     test_the_build_says_which_snow_it_will_use()
     test_the_model_digest_runs_between_the_parse_and_the_load()
     test_the_digest_reports_only_what_the_parse_found()
+    test_run_app_deploy_does_not_shadow_the_config_module()
+    test_the_streamlit_deploy_stages_the_whole_locked_library()
+    test_deploying_is_never_the_default()
+    test_the_wizard_forbids_treating_parameters_as_consent()
+    test_the_three_step_run_shape_is_documented()
+    test_the_streamlit_layout_is_pinned_like_the_react_one()

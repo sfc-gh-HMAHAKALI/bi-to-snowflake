@@ -45,6 +45,19 @@ python3 tests/check_measured_defects.py || fail=1
 echo "== the suite still passes after a real build, not just on a clone =="
 python3 tests/check_post_build_state.py || fail=1
 
+echo "== teardown removes the security role and distinguishes already-gone =="
+if python3 pipeline/teardown.py --database T --kb-database K --prefix RT9 \
+     --connection __none__ 2>/dev/null | grep -q "Security role RT9_SECURITY_ADMIN"; then
+  echo "  the account-level security role is in the plan"
+else
+  echo "  FAIL teardown does not drop the security role"; fail=1
+fi
+if grep -q "def already_gone" pipeline/teardown.py; then
+  echo "  already-gone is distinguished from failed"
+else
+  echo "  FAIL teardown counts already-absent objects as failures"; fail=1
+fi
+
 echo "== teardown plans a dry run and refuses to act without --execute =="
 if python3 pipeline/teardown.py --database T --kb-database K \
      --connection __none__ 2>/dev/null | grep -q "statements planned"; then
