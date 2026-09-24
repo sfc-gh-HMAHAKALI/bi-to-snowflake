@@ -185,10 +185,104 @@ def test_both_runners_share_an_interface_and_the_cli_remains_a_fallback() -> Non
     print("  connector session by default, CLI fallback, --use-cli escape hatch")
 
 
+def test_variant_and_array_columns_never_appear_inside_the_values_clause() -> None:
+    """A VALUES row constructor takes literals. PARSE_JSON in one is rejected.
+
+    This shipped broken. The VALUES reshape was measured on a synthetic batch of
+    plain string columns, so it never rendered a VARIANT or an ARRAY, and the
+    first real model it touched failed at once:
+
+        002014 (22000): SQL compilation error:
+        Invalid expression [PARSE_JSON('{...}')] in VALUES clause
+
+    The values travel as plain strings and are converted in the SELECT that wraps
+    the VALUES list. So no PARSE_JSON may appear between `FROM VALUES` and the
+    closing alias, and the conversion must appear in the select list instead.
+    """
+    import kb_loader as K
+
+    captured: list[list[str]] = []
+
+    class Fake:
+        def run_statements(self, stmts, label): captured.append(stmts)
+        def run_file(self, sql, label):
+            raise AssertionError("the KB load must pass statements as a list")
+        def close(self): pass
+
+    ldr = K.KnowledgeBaseLoader(Fake(), "cognos", "M", "load1", {}, "MYKB")
+    # One of each shape the renderers can produce, including the empty array and
+    # the None cases, which take different branches.
+    rows = [[K._sql_str("k%d" % i),
+             K._sql_variant({"depth": i, "note": "it's quoted"}),
+             K._sql_array(["a", "b"]) if i % 2 else K._sql_array(None),
+             K._sql_variant(None)]
+            for i in range(20)]
+    ldr._merge("KB_THING", ["C1"], ["C1", "C2", "C3", "C4"], rows, "thing")
+
+    stmts = [s for batch in captured for s in batch]
+    assert stmts, "no statement was produced"
+    for s in stmts:
+        assert "FROM VALUES" in s, "MERGE source is not a VALUES list"
+        head, rest = s.split("FROM VALUES", 1)
+        body = rest.split("AS v(", 1)[0]
+        assert "PARSE_JSON" not in body, (
+            "PARSE_JSON is inside the VALUES clause; Snowflake rejects it:\n%s"
+            % body[:400])
+        assert "ARRAY_CONSTRUCT" not in body, (
+            "ARRAY_CONSTRUCT is inside the VALUES clause:\n%s" % body[:400])
+        assert "PARSE_JSON(v2)" in head, \
+            "the VARIANT column is no longer rebuilt in the select list"
+        assert "PARSE_JSON(v3)::ARRAY" in head, \
+            "the ARRAY column is no longer rebuilt in the select list"
+        assert "v1," in head, "the plain literal column should pass through unwrapped"
+    print("  VARIANT and ARRAY values travel as literals and convert in the SELECT")
+
+
+def test_an_unrecognised_expression_falls_back_instead_of_emitting_bad_sql() -> None:
+    """Anything the hoist cannot express must go back to the UNION ALL form.
+
+    The fallback is the whole reason this is safe to ship. A value shape nobody
+    anticipated -- a function call, a column reference, a cast this code does not
+    know -- must produce slower SQL, never invalid SQL, and never SQL that means
+    something subtly different.
+    """
+    import kb_loader as K
+
+    # Refuses what it cannot express.
+    assert K._hoist_expressions([["CURRENT_TIMESTAMP()"]], 1) is None, \
+        "an unknown expression was hoisted into a VALUES clause anyway"
+    # Refuses to wrap a plain string in PARSE_JSON, which would fail at runtime.
+    mixed = [[K._sql_variant({"a": 1})], [K._sql_str("not json")]]
+    assert K._hoist_expressions(mixed, 1) is None, \
+        "a column mixing JSON and plain text was hoisted; PARSE_JSON would fail on it"
+    # NULL coexists with JSON, because PARSE_JSON(NULL) is NULL either way.
+    ok = K._hoist_expressions([[K._sql_variant({"a": 1})], [K._sql_variant(None)]], 1)
+    assert ok is not None and ok[1] == ["PARSE_JSON(v1)"], \
+        "NULL should not block hoisting a JSON column: %r" % (ok,)
+
+    captured: list[list[str]] = []
+
+    class Fake:
+        def run_statements(self, stmts, label): captured.append(stmts)
+        def run_file(self, sql, label): raise AssertionError("must be a list")
+        def close(self): pass
+
+    ldr = K.KnowledgeBaseLoader(Fake(), "cognos", "M", "load1", {}, "MYKB")
+    ldr._merge("KB_THING", ["C1"], ["C1", "C2"],
+               [[K._sql_str("k"), "CURRENT_TIMESTAMP()"]], "thing")
+    s = captured[0][0]
+    assert "UNION ALL" in s or "SELECT " in s, "no fallback source was emitted"
+    assert "FROM VALUES" not in s, \
+        "an unhoistable batch still used a VALUES clause:\n%s" % s[:400]
+    print("  unhoistable batches fall back to SELECT/UNION ALL, never invalid SQL")
+
+
 if __name__ == "__main__":
     test_loader_targets_kb_database_not_analytics_database()
     test_main_wires_kb_database_flag()
     test_path1_honours_kb_naming_flags()
     test_merge_uses_a_values_list_not_a_union_all_chain()
+    test_variant_and_array_columns_never_appear_inside_the_values_clause()
+    test_an_unrecognised_expression_falls_back_instead_of_emitting_bad_sql()
     test_statements_are_never_reparsed_out_of_a_joined_string()
     test_both_runners_share_an_interface_and_the_cli_remains_a_fallback()

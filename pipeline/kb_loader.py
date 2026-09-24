@@ -29,6 +29,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -94,6 +95,80 @@ def _sql_array(v: Iterable[Any] | None) -> str:
     if not v:
         return "ARRAY_CONSTRUCT()"
     return f"PARSE_JSON({_sql_str(json.dumps(list(v), default=str))})::ARRAY"
+
+
+# A VALUES row constructor takes literals only. `PARSE_JSON('...')` in one is
+# rejected outright -- "Invalid expression [...] in VALUES clause" -- so the
+# VARIANT and ARRAY columns have to carry their JSON as a plain string in VALUES
+# and be converted in the SELECT that wraps it. These recognise the three shapes
+# the renderers above can produce, and nothing else: anything unrecognised sends
+# the batch back to the UNION ALL form rather than guessing.
+_LITERAL = re.compile(r"^(?:NULL|TRUE|FALSE|-?\d+(?:\.\d+)?|'(?:[^']|'')*')$", re.S)
+_VARIANT = re.compile(r"^PARSE_JSON\(('(?:[^']|'')*')\)$", re.S)
+_ARRAY = re.compile(r"^PARSE_JSON\(('(?:[^']|'')*')\)::ARRAY$", re.S)
+_EMPTY_ARRAY = "ARRAY_CONSTRUCT()"
+
+
+def _hoist_expressions(
+    batch: list[list[str]], ncols: int
+) -> tuple[list[list[str]], list[str]] | None:
+    """Split pre-rendered row values into VALUES literals plus SELECT expressions.
+
+    Returns ``(rows, select_exprs)`` where every value in ``rows`` is a literal a
+    VALUES clause will accept, and ``select_exprs`` rebuilds the original types
+    from the inner aliases ``v1..vn``. Returns ``None`` when any column cannot be
+    expressed this way, so the caller can fall back rather than emit SQL that is
+    wrong in a way only the server will notice.
+
+    A column is only converted when every row agrees on its shape. In particular a
+    non-NULL literal is never wrapped in ``PARSE_JSON``: that would turn a plain
+    string into a parse error at execution time.
+    """
+    kinds: list[str] = []
+    for j in range(ncols):
+        has_json = has_array = has_real_literal = False
+        for row in batch:
+            v = row[j]
+            if v == "NULL":
+                continue
+            if _VARIANT.match(v):
+                has_json = True
+            elif _ARRAY.match(v) or v == _EMPTY_ARRAY:
+                has_array = True
+            elif _LITERAL.match(v):
+                has_real_literal = True
+            else:
+                return None
+        if has_json and has_array:
+            return None
+        if (has_json or has_array) and has_real_literal:
+            return None
+        kinds.append("json" if has_json else "array" if has_array else "literal")
+
+    rows: list[list[str]] = []
+    for row in batch:
+        out: list[str] = []
+        for j, kind in enumerate(kinds):
+            v = row[j]
+            if kind == "literal" or v == "NULL":
+                out.append(v)
+            elif v == _EMPTY_ARRAY:
+                out.append("'[]'")
+            else:
+                m = _VARIANT.match(v) or _ARRAY.match(v)
+                out.append(m.group(1))
+        rows.append(out)
+
+    select = []
+    for j, kind in enumerate(kinds):
+        alias = "v%d" % (j + 1)
+        if kind == "json":
+            select.append("PARSE_JSON(%s)" % alias)
+        elif kind == "array":
+            select.append("PARSE_JSON(%s)::ARRAY" % alias)
+        else:
+            select.append(alias)
+    return rows, select
 
 
 class SnowSqlRunner:
@@ -301,10 +376,29 @@ class KnowledgeBaseLoader:
             # Everything else here is unchanged on purpose: same batch size, same
             # natural-key ON clause, same MERGE semantics. Re-running still
             # converges rather than duplicating.
-            values = ",\n    ".join("(" + ", ".join(r) + ")" for r in batch)
+            #
+            # A VALUES clause holds literals only, so the VARIANT and ARRAY columns
+            # travel as strings and are converted in the wrapping SELECT. If a
+            # batch has a column that cannot be expressed that way, fall back to
+            # the UNION ALL form for that batch -- slower, and always valid.
+            hoisted = _hoist_expressions(batch, len(all_columns))
+            if hoisted is None:
+                selects = "\n    UNION ALL ".join(
+                    "SELECT " + ", ".join(
+                        "%s AS %s" % (v, c) for v, c in zip(row, all_columns))
+                    for row in batch)
+                source = "(\n    %s\n)" % selects
+            else:
+                rows, select_exprs = hoisted
+                inner = ",\n        ".join(
+                    "(" + ", ".join(r) + ")" for r in rows)
+                aliases = ", ".join("v%d" % (j + 1) for j in range(len(all_columns)))
+                source = (
+                    "(\n    SELECT %s\n    FROM VALUES\n        %s\n    AS v(%s)\n)"
+                    % (", ".join(select_exprs), inner, aliases))
             statements.append(
                 f"MERGE INTO {self.target_database}.{KB_SCHEMA}.{table} t\n"
-                f"USING (SELECT * FROM VALUES\n    {values}\n) s ({col_list})\n"
+                f"USING {source} s ({col_list})\n"
                 f"ON {on_clause}\n"
                 f"WHEN MATCHED THEN UPDATE SET {set_clause}\n"
                 f"WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({insert_vals});"
