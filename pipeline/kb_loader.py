@@ -154,14 +154,16 @@ class KnowledgeBaseLoader:
         source_model: str,
         load_id: str,
         schema_map: dict[str, str],
-        database: str,
+        kb_database: str,
     ):
         self.runner = runner
         self.system = source_system
         self.model = source_model
         self.load_id = load_id
         self.schema_map = schema_map
-        self.target_database = database
+        # The knowledge base, not the analytics layer -- 01_kb_tables.sql creates
+        # KNOWLEDGE_BASE in {{KB_DB}}, and the two are commonly different databases.
+        self.target_database = kb_database
         self.stats: dict[str, int] = {}
 
     # -- helpers ------------------------------------------------------------
@@ -881,7 +883,7 @@ def main(argv: list[str] | None = None) -> int:
         model,
         load_id,
         schema_map,
-        args.database,
+        args.kb_database,
     )
 
     loader.load_source_model(inv, analysis, args.inventory)

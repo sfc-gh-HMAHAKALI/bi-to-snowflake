@@ -31,7 +31,10 @@ import tempfile
 
 import config
 
-KB = config.DEFAULT.kb  # overridden from the naming flags in main()
+# Rebound in main() from the naming flags. Every {KB} below is an f-string
+# evaluated at call time, so it picks up the rebind -- but a module-level
+# f-string constant would not, which is why the DDL blocks are functions.
+KB = config.DEFAULT.kb
 
 
 def run_sql(sql: str, connection: str, label: str) -> str:
@@ -114,7 +117,8 @@ def existing_columns(connection: str, database: str) -> set[tuple[str, str, str]
 # 1 + 2. Comments and tags
 # ---------------------------------------------------------------------------
 
-TAG_DDL = f"""
+def tag_ddl() -> str:
+    return f"""
 USE SCHEMA {KB};
 
 -- Tags live in the KB schema, not on the data, so the taxonomy is versioned
@@ -295,7 +299,8 @@ def generate_tags(connection: str, database: str) -> str:
 # 3. Business glossary
 # ---------------------------------------------------------------------------
 
-GLOSSARY_DDL = f"""
+def glossary_ddl() -> str:
+    return f"""
 USE SCHEMA {KB};
 
 -- Shape follows the existing BUSINESS_GLOSSARY already in this account
@@ -326,7 +331,8 @@ CREATE OR REPLACE TABLE BUSINESS_GLOSSARY (
 COMMENT = 'Governed business glossary, generated from the semantic knowledge base.';
 """
 
-GLOSSARY_LOAD = f"""
+def glossary_load() -> str:
+    return f"""
 USE SCHEMA {KB};
 
 INSERT INTO BUSINESS_GLOSSARY
@@ -447,6 +453,12 @@ def main(argv=None) -> int:
     ap.add_argument("--execute", action="store_true")
     args = ap.parse_args(argv)
 
+    # Bind the knowledge-base location from the naming flags before any DDL
+    # is built or any query runs. Without this the whole script silently
+    # targeted the default KB database and ignored --kb-database.
+    global KB
+    KB = config.from_args(args).kb
+
     os.makedirs(args.out_dir, exist_ok=True)
     os.makedirs("out", exist_ok=True)
 
@@ -456,10 +468,10 @@ def main(argv=None) -> int:
     ontology = generate_ontology_handoff(args.connection)
 
     files = {
-        "20_tag_taxonomy.sql": TAG_DDL,
+        "20_tag_taxonomy.sql": tag_ddl(),
         "21_object_comments.sql": comments,
         "22_tag_assignments.sql": tags,
-        "23_business_glossary.sql": GLOSSARY_DDL + GLOSSARY_LOAD,
+        "23_business_glossary.sql": glossary_ddl() + glossary_load(),
     }
     for name, sql in files.items():
         p = os.path.join(args.out_dir, name)
@@ -477,10 +489,10 @@ def main(argv=None) -> int:
 
     if args.execute:
         print("executing:")
-        run_sql(TAG_DDL, args.connection, "tag taxonomy")
+        run_sql(tag_ddl(), args.connection, "tag taxonomy")
         run_sql(comments, args.connection, "object + column comments")
         run_sql(tags, args.connection, "tag assignments")
-        run_sql(GLOSSARY_DDL + GLOSSARY_LOAD, args.connection, "business glossary")
+        run_sql(glossary_ddl() + glossary_load(), args.connection, "business glossary")
 
     return 0
 
