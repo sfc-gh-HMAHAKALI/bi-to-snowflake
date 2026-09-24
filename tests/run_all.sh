@@ -42,6 +42,9 @@ python3 tests/check_pipeline_regressions.py || fail=1
 echo "== measured-defect guards (D1-D19 from the instrumented run) =="
 python3 tests/check_measured_defects.py || fail=1
 
+echo "== the suite still passes after a real build, not just on a clone =="
+python3 tests/check_post_build_state.py || fail=1
+
 echo "== teardown plans a dry run and refuses to act without --execute =="
 if python3 pipeline/teardown.py --database T --kb-database K \
      --connection __none__ 2>/dev/null | grep -q "statements planned"; then

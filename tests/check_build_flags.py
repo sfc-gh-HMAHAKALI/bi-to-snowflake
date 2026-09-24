@@ -48,22 +48,59 @@ def test_dry_run_phase_counts():
 def test_missing_app_source_is_caught_in_preflight():
     """A deploy phase with no composed app must fail before anything is created.
 
-    The app source is composed per model and is not in the repo, so in a clean
-    checkout every mode that plans a deploy should say so up front. --deploy none
-    plans no deploy, so it must stay silent about app source.
+    This arranges its own fixture rather than asserting on ambient absence. The
+    earlier version counted complaints from a real `build.py` run in this
+    checkout, which is only meaningful while `pipeline/app_streamlit/` and
+    `pipeline/app_react/` happen not to exist. Compose an app -- which any path
+    2/4 run requires -- and the assertion flipped, the preflight then ran on into
+    a live connectivity check, and the suite reported a failure that blamed the
+    user's connection. So the suite passed on a pristine clone and failed after a
+    successful build, which is exactly backwards.
     """
+    import tempfile
+
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    try:
+        import build as B
+    finally:
+        sys.path.pop(0)
+
+    real_here = B.HERE
     expect = {"all": 2, "streamlit": 1, "react": 1, "none": 0}
-    for mode, want in expect.items():
-        res = build(["--paths", "4", "--deploy", mode, "--skip-physical",
-                     "--connection", "__none__"])
-        n = res.stdout.count("app source is not composed")
-        assert n == want, \
-            "--deploy %s: expected %d app-source complaints, got %d:\n%s" % (
-                mode, want, n, res.stdout)
-        if want:
-            assert "Nothing executed" in res.stdout, \
-                "--deploy %s complained but did not stop" % mode
-    print("  composed-app preflight fires per surface, and not for --deploy none")
+    try:
+        # (i) Nothing composed: every mode planning a deploy must complain.
+        empty = tempfile.mkdtemp(prefix="b2s-empty-")
+        B.HERE = empty
+        for mode, want in expect.items():
+            plan = B.resolve({4}, False, False, deploy=mode)
+            n = len(B.missing_app_source(plan))
+            assert n == want, \
+                "empty tree, --deploy %s: expected %d complaints, got %d" % (mode, want, n)
+
+        # (ii) Everything composed: no mode may complain.
+        full = tempfile.mkdtemp(prefix="b2s-full-")
+        for folder, names in (("app_streamlit", B.STREAMLIT_SOURCE),
+                              ("app_react", B.REACT_SOURCE)):
+            for name in names:
+                p = os.path.join(full, folder, name)
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                open(p, "w").close()
+        B.HERE = full
+        for mode in expect:
+            plan = B.resolve({4}, False, False, deploy=mode)
+            problems = B.missing_app_source(plan)
+            assert not problems, \
+                "fully composed, --deploy %s still complained: %s" % (mode, problems)
+    finally:
+        B.HERE = real_here
+
+    # End to end, but only the assertion that holds in either state: a build that
+    # plans no deploy must never complain about app source.
+    res = build(["--paths", "4", "--deploy", "none", "--skip-physical",
+                 "--connection", "__none__"])
+    assert res.stdout.count("app source is not composed") == 0, \
+        "--deploy none complained about app source:\n%s" % res.stdout
+    print("  composed-app preflight fires per surface, from a fixture, not ambient state")
 
 
 
