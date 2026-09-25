@@ -861,6 +861,10 @@ def main(argv=None) -> int:
                     plan[desc_idx].args = [
                         "--inventory", args.inventory,
                         "--source", args.extract,
+                        # This copy is written while the load runs, so it is framed
+                        # that way. The wizard produces the same document earlier,
+                        # before anything exists, and says so instead.
+                        "--stage", "build",
                     ]
         dt = time.time() - t0
         results.append({"phase": p.key, "title": p.title, "ok": ok, "seconds": round(dt, 1)})

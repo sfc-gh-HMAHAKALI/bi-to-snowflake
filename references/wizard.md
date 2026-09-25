@@ -63,7 +63,29 @@ user has to go and look up is worse than a wrong guess they can correct.
 ```bash
 cd "$SKILL_DIR"   # the directory holding SKILL.md; do not hardcode the skill name
 python3 -m modules.cli parse --type <type> "<path>" -o /tmp/b2s/inventory.json
+python3 pipeline/describe_model.py --inventory /tmp/b2s/inventory.json \
+        --source "<path>" --out /tmp/b2s/model-overview.md
 ```
+
+**Give the user that Markdown file now, before round 2.** Tell them the full path and
+offer to open it. This is the first thing they get back after pointing at their model,
+it takes about two seconds to produce, and it needs no Snowflake connection at all.
+
+It is also the answer to a question they will otherwise ask during the build: the
+knowledge base load is the longest phase, around two minutes, and a user with nothing to
+read will watch a progress log. Handing them a description of their own model turns that
+wait into something useful — and it lets them check what was found *before* agreeing to
+build anything on top of it.
+
+The digest covers the counts below plus the things worth knowing that a count cannot
+carry: which data sources already point at Snowflake, how many objects are fiscal-year
+copies of each other, how many security filters there are and how few distinct *shapes*
+they reduce to, and what is flagged with the reasons grouped. Read it yourself before
+round 2 — it is the same material round 2 and the confirmation gate are built from.
+
+`build.py` regenerates it as its own `describe` phase, so a direct CLI run still produces
+one. But that phase runs after three Snowflake DDL phases, so waiting for it means the
+user has already committed to the build. In a guided run, produce it here.
 
 Then read the counts out of the inventory. The parse-stage inventory's top-level keys are
 `dimensions`, `metrics`, `hierarchies`, `tables`, `facts`, `relationships`,

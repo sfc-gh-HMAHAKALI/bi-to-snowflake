@@ -598,6 +598,108 @@ def test_the_deploy_answer_is_not_treated_as_a_path() -> None:
     print("  the deploy answer is documented as a flag, not a path, with its synonyms")
 
 
+def test_the_parse_creates_its_output_directory() -> None:
+    """The first documented command of a guided run must work on a fresh machine.
+
+    `modules.cli parse ... -o /tmp/b2s/inventory.json` failed with FileNotFoundError
+    whenever /tmp/b2s did not already exist -- which is every machine on its first run.
+    Worse, it surfaces as a parse error report, so it reads as "your model could not be
+    parsed" when the parse succeeded and only the write failed. build.py never hit it
+    because run_extract makes the directory first; only the documented command did.
+    """
+    import tempfile
+    sys.path.insert(0, ROOT)
+    try:
+        from modules.output.inventory import save_inventory
+    finally:
+        sys.path.pop(0)
+
+    base = tempfile.mkdtemp(prefix="b2s-nodir-")
+    nested = os.path.join(base, "does", "not", "exist", "inventory.json")
+    save_inventory({"source_type": "cognos"}, nested)
+    assert os.path.isfile(nested), "save_inventory did not create its parent directory"
+    print("  the parse creates its output directory instead of reporting a parse failure")
+
+
+def test_the_wizard_hands_over_the_digest_before_asking_what_to_build() -> None:
+    """The model description must be offered at the profile step, not mid-build.
+
+    It was implemented only as build phase 5, behind three Snowflake DDL phases, and
+    neither SKILL.md nor wizard.md mentioned it at all -- so an agent following the
+    documented flow never produced it and the user never saw one. The point of the
+    document is to be the first thing handed back after pointing at a model, and to be
+    readable before committing to a build.
+    """
+    wiz = open(os.path.join(ROOT, "references", "wizard.md"), encoding="utf-8").read()
+    skill = open(os.path.join(ROOT, "SKILL.md"), encoding="utf-8").read()
+
+    for name, doc in (("wizard.md", wiz), ("SKILL.md", skill)):
+        assert "describe_model.py" in doc, \
+            "%s never tells the agent to produce the model description" % name
+
+    # In the wizard it must come before round 2, not after.
+    profile_at = wiz.index("describe_model.py")
+    round2_at = wiz.index("## Round 2")
+    assert profile_at < round2_at, \
+        "the digest is documented after round 2; it exists to inform round 2"
+
+    # And the agent must be told to hand it over, not just generate it.
+    assert "Give the user that Markdown file now" in wiz, \
+        "the wizard generates the digest but never says to show it to the user"
+
+    # The build phase stays, as the fallback for a direct CLI run.
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    try:
+        import build as B
+    finally:
+        sys.path.pop(0)
+    assert "describe" in [p.key for p in B.resolve({1, 2, 3, 4}, True, True, deploy="none")], \
+        "the build no longer regenerates the digest for non-wizard runs"
+    print("  the digest is handed over at the profile step, before round 2")
+
+
+def test_the_digest_does_not_claim_a_build_is_running_when_none_is() -> None:
+    """One document, two moments -- the framing must match which one it is.
+
+    Produced at the wizard step it said "the knowledge base load is running while you
+    read this", which is simply untrue before anything has been created and undermines
+    the one thing the document is for: being trustworthy about the model.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    try:
+        import describe_model as D
+    finally:
+        sys.path.pop(0)
+
+    tiny = {"source_type": "cognos", "tables": [{"name": "T"}],
+            "dimensions": [], "metrics": [], "facts": [], "relationships": [],
+            "hierarchies": [], "grain_declarations": [], "filters": [],
+            "security_rules": [], "dashboards": [], "worksheets": [], "errors": [],
+            "complexity_summary": {}, "flagged": [],
+            "source_analysis": {"model_name": "T", "clones": {}, "data_sources": {},
+                                "security_summary": {}}}
+
+    profile = D.render(tiny, "/x/T.zip", stage="profile")
+    assert "Nothing has been built yet" in profile, \
+        "the profile-stage digest does not say that nothing exists yet"
+    assert "load is running while you read this" not in profile, \
+        "the profile-stage digest claims a build is in progress when none is"
+
+    during = D.render(tiny, "/x/T.zip", stage="build")
+    assert "load is running while you read this" in during, \
+        "the build-stage digest lost its framing"
+
+    # Default must be the wizard stage, since that is now the primary path.
+    assert D.render(tiny, "/x/T.zip") == profile, \
+        "render() defaults to the build framing; the wizard path is the common one"
+
+    # And build.py must pass the build stage explicitly.
+    src = open(os.path.join(ROOT, "pipeline", "build.py"), encoding="utf-8").read()
+    assert '"--stage", "build"' in src, \
+        "build.py does not tell describe_model.py it is running mid-build"
+    print("  the digest's framing matches when it was produced, and defaults to profile")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -616,3 +718,6 @@ if __name__ == "__main__":
     test_the_streamlit_layout_is_pinned_like_the_react_one()
     test_the_deploy_question_and_its_mapping_use_the_same_labels()
     test_the_deploy_answer_is_not_treated_as_a_path()
+    test_the_parse_creates_its_output_directory()
+    test_the_wizard_hands_over_the_digest_before_asking_what_to_build()
+    test_the_digest_does_not_claim_a_build_is_running_when_none_is()

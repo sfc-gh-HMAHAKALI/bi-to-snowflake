@@ -67,6 +67,22 @@ Composition choices are governed by `references/composition-rules.md`, not by ta
 The guided wizard, the output selector and the phase graph are documented in
 `references/wizard.md`. Load it before starting a run.
 
+**The first thing to hand back, before any questions about what to build, is a
+description of their model.** Parse the file and write the digest -- about two seconds,
+no Snowflake connection needed -- then give them the path:
+
+```bash
+python3 -m modules.cli parse --type <type> "<path>" -o /tmp/b2s/inventory.json
+python3 pipeline/describe_model.py --inventory /tmp/b2s/inventory.json \
+        --source "<path>" --out /tmp/b2s/model-overview.md
+```
+
+It tells them what is in their model, what repeats, how access is controlled and what
+needs a human eye. It also gives them something to read during the knowledge base load,
+which is the longest phase of the build. Do not wait for the build to produce it: the
+`describe` phase runs after three Snowflake DDL phases, so by then they have already
+committed.
+
 When a run finishes, offer a few prompts from `references/example-prompts.md`.
 A user handed a new agent with no idea what to ask it concludes it does not
 work.

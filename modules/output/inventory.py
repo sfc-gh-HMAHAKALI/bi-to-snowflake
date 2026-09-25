@@ -5,6 +5,7 @@ structure that the YAML generator consumes.
 """
 
 import json
+import os
 from typing import Any
 
 from ..common.logger import get_logger
@@ -182,8 +183,19 @@ def merge_inventories(inventories: list[dict]) -> dict:
 
 
 def save_inventory(inventory: dict, output_path: str) -> str:
-    """Save inventory to JSON file."""
+    """Save inventory to JSON file.
+
+    Creates the parent directory. Without this, the documented first command of a
+    guided run -- `modules.cli parse ... -o /tmp/b2s/inventory.json` -- failed with
+    FileNotFoundError on any machine where /tmp/b2s did not already exist, which is
+    every machine on its first run. The failure arrives as a parse error report, so it
+    reads as "your model could not be parsed" when the parse in fact succeeded and
+    only the write failed. build.py never hit it because run_extract makes the
+    directory first; only the documented standalone command did.
+    """
     log.info("Saving inventory to %s", output_path)
+    parent = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(parent, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(inventory, f, indent=2, default=str)
     log.info("Inventory saved: %s", output_path)

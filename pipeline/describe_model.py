@@ -199,7 +199,7 @@ def _needs_a_look(inv: dict) -> list[str]:
     return out
 
 
-def render(inv: dict, source_path: str) -> str:
+def render(inv: dict, source_path: str, stage: str = "profile") -> str:
     sa = inv.get("source_analysis") or {}
     clones = sa.get("clones") or {}
     name = sa.get("model_name") or inv.get("source_model") or "your model"
@@ -211,10 +211,19 @@ def render(inv: dict, source_path: str) -> str:
         "Parsed from `%s` -- a %s model. Nothing has been changed in the source; this "
         "is a read of what is in it.\n"
         % (os.path.basename(source_path) if source_path else "your model file", tool))
-    out.append(
-        "The knowledge base load is running while you read this. It is the longest step "
-        "in the build, and everything below is already in hand, so this is a good moment "
-        "to check that what was found matches what you expected.\n")
+    # The same document is produced at two different moments and the framing has to
+    # match, or it tells the reader something untrue about what is happening.
+    if stage == "build":
+        out.append(
+            "The knowledge base load is running while you read this. It is the longest "
+            "step in the build, and everything below is already in hand, so this is a "
+            "good moment to check that what was found matches what you expected.\n")
+    else:
+        out.append(
+            "**Nothing has been built yet.** This took about two seconds and touched no "
+            "Snowflake object. Read it before agreeing to build anything on top of it -- "
+            "if something below does not match what you expected, that is much cheaper "
+            "to resolve now.\n")
 
     errors = inv.get("errors") or []
     if errors:
@@ -267,6 +276,10 @@ def main() -> int:
     # a .zip, not an inv.json.
     ap.add_argument("--source", default="", help="The original BI model file, for the heading")
     ap.add_argument("--out", help="Where to write the digest (default: alongside the inventory)")
+    # Two moments, two framings. "profile" is the wizard step, before anything is
+    # created; "build" is the phase that runs while the knowledge base loads.
+    ap.add_argument("--stage", choices=["profile", "build"], default="profile",
+                    help="Where in the run this is being produced")
     ap.add_argument("--connection", help="Unused; accepted so the build can pass it")
     config.add_arguments(ap)
     ap.add_argument("--log-level", default="INFO")
@@ -281,11 +294,14 @@ def main() -> int:
                                     "model-overview.md")
     os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
     with open(dest, "w", encoding="utf-8") as fh:
-        fh.write(render(inv, args.source))
+        fh.write(render(inv, args.source, stage=args.stage))
 
     log.info("Wrote a description of your model while the rest of the build runs:")
     log.info("  %s", dest)
-    log.info("  Open it now -- the next phase takes about two minutes.")
+    if args.stage == "build":
+        log.info("  Open it now -- the next phase takes about two minutes.")
+    else:
+        log.info("  Read it before deciding what to build.")
     print(json.dumps({"status": "ok", "overview": dest}, indent=2))
     return 0
 
