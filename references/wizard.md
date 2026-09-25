@@ -539,23 +539,42 @@ the build is the thing that is happening.
 
 Relay the milestones as well, but do not treat relaying as a substitute for the path.
 
-### The build narrates itself -- do not poll Snowflake to guess its progress
+### While the build runs: read the log often, do not query Snowflake
 
-The `describe` and `kb-load` phases stream their output line by line. The knowledge base
-load announces every table before it writes it, in plain language, with a running row
-count and elapsed time. **Relay those lines. Do not open a second connection and count
-rows to infer progress.**
+There are two different things here and only one of them is forbidden.
 
-Polling produces confident nonsense. An observed run reported *"Security mappings now
-loading (888 of 19,921)"* -- 888 is the **final** row count of the access-group mapping
-table, and 19,921 is the number of access rules in the source model. Two unrelated
-numbers presented as a ratio, so the same line then read *"row count is static at 888,
-the load likely moved on"* and several more polling cycles were spent on a table that
-had already finished. The streamed narration said so directly.
+**Required — check the log every 20 to 30 seconds and relay what changed:**
 
-The access-rule table is the long one -- roughly seventy seconds, tens of thousands of
-rows, loaded in batches. Silence there is normal and the narration says as much in its
-opening. Waiting is the correct behaviour.
+```bash
+tail -n 5 pipeline/out/build-log.txt
+```
+
+The `describe`, `kb-load` and `p1-catalog` phases stream line by line: every knowledge
+base table is announced before it is written, in plain language, with a row count and
+elapsed time, and the catalog phase states each batch and its statement count before
+running it. That is a real progress feed. **Relay the newest line in your own short
+sentence each time you look.** One or two sentences is plenty -- "loading the access
+rules, 19,051 rows, 1m32s in" tells the user exactly where the build is.
+
+**Do not sleep for 120 or 240 seconds at a stretch.** That was the correction to an
+earlier defect overshooting: an earlier run polled Snowflake row counts and invented
+progress from them, the fix said stop polling, and it was read as "stop looking". The
+result was a silent build with nothing between "starting" and "done" -- which is the
+same problem the streamed narration was added to solve. Sleep in 20-30 second steps and
+say something after each one.
+
+**Forbidden — opening a second connection and counting rows to infer progress.** That
+is what produced confident nonsense: *"Security mappings now loading (888 of 19,921)"*,
+where 888 is the **final** count of the access-group mapping table and 19,921 is the
+number of access rules in the source model. Two unrelated numbers presented as a ratio,
+followed by *"row count is static at 888, the load likely moved on"* and several more
+cycles spent on a table that had already finished. The log said so directly.
+
+Reading a file the build is writing is not polling. Querying Snowflake to guess what
+the build is doing is.
+
+The access-rule table is the long one -- tens of thousands of rows in batches. A pause
+there is expected, and the log's opening says so. Keep reporting during it.
 
 ## After the build
 

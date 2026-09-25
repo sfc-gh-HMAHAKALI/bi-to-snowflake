@@ -703,39 +703,6 @@ def test_the_digest_does_not_claim_a_build_is_running_when_none_is() -> None:
     print("  the digest's framing matches when it was produced, and defaults to profile")
 
 
-def test_the_wizard_forbids_polling_for_progress() -> None:
-    """The streamed narration is the progress report; guessing at it invents numbers.
-
-    An observed run polled row counts and announced "Security mappings now loading
-    (888 of 19,921)" -- the mapping table's FINAL count against the source model's
-    access-rule count, two unrelated numbers dressed as a ratio. It then decided the
-    static count meant the load had moved on, and kept polling a finished table.
-    """
-    wiz = open(os.path.join(ROOT, "references", "wizard.md"), encoding="utf-8").read()
-    # Collapse wrapping: the rule spans lines, and a heading must not satisfy the check.
-    low = " ".join(wiz.lower().split())
-    body = " ".join(l for l in low.split("### ") if not l.startswith("the build narrates"))
-    assert "rows to infer progress" in low, \
-        "wizard.md does not forbid counting rows to infer build progress"
-    assert "do not poll" in body or "do not open a second connection" in low, \
-        "the no-polling rule survives only as a heading, not as an instruction"
-    assert "888" in wiz and "19,921" in wiz, \
-        "the concrete invented-ratio example is gone; the rule reads as abstract advice"
-    assert "relay those lines" in low, \
-        "wizard.md does not say what to do instead of polling"
-    b = open(os.path.join(ROOT, "pipeline", "build.py"), encoding="utf-8").read()
-    # The rule is worthless if the phases stopped streaming. Bound each declaration by
-    # the next Phase( rather than the first "),": depends_on=("extract",), contains one.
-    for phase in ("describe", "kb-load"):
-        decl = b[b.index('Phase("%s"' % phase) + 1:]
-        nxt = decl.find("\n    Phase(")
-        decl = decl[:nxt] if nxt != -1 else decl[:decl.find("\n]")]
-        assert "stream=True" in decl, (
-            "wizard.md tells the agent to read streamed output, but the %s phase "
-            "does not stream" % phase)
-    print("  the wizard relays streamed progress instead of inventing it from row counts")
-
-
 def test_the_build_writes_a_log_the_user_can_read_while_it_runs() -> None:
     """Streaming to stdout reaches nobody when the build runs inside a tool call.
 
@@ -827,8 +794,11 @@ def test_composed_apps_are_handed_over_not_auditioned() -> None:
         "the entry points do not carry the caveat, so it depends on reading the rules doc"
 
     # (v) And no unbounded waiting.
-    assert "do not wait forever" in comp, \
-        "composition-rules.md does not bound how long the agent waits on a command"
+    # Bounded waiting now means short, repeated, reporting sleeps -- see
+    # test_the_wizard_reports_progress_often_without_polling_snowflake. The earlier
+    # phrasing here ("wait on it once") was itself the cause of a silent 240s sleep.
+    assert "unbounded" in comp, \
+        "composition-rules.md no longer rules out an unbounded wait"
     print("  composed apps are handed over with a caveat, not auditioned for ten minutes")
 
 
@@ -1242,6 +1212,62 @@ def test_the_model_specific_boundary_is_documented_and_accurate() -> None:
     print("  the model-specific boundary is documented and matches the code")
 
 
+def test_the_wizard_reports_progress_often_without_polling_snowflake() -> None:
+    """Two failures, opposite directions, and the rule has to prevent both.
+
+    First: an agent polled Snowflake row counts and invented "Security mappings now
+    loading (888 of 19,921)" -- a finished table's final count against an unrelated
+    total, dressed as a ratio. The fix said stop polling.
+
+    Then the overcorrection: "waiting is the correct behaviour" plus "wait on it once
+    with a bounded sleep" was read as stop looking, and a run slept 120-240s at a
+    stretch with nothing said between starting and done -- the same silence the
+    streamed narration was built to remove. Reading the log the build is writing is
+    not polling; querying Snowflake to guess progress is.
+    """
+    wiz = " ".join(open(os.path.join(ROOT, "references", "wizard.md"),
+                        encoding="utf-8").read().lower().split())
+    comp = " ".join(open(os.path.join(ROOT, "references", "composition-rules.md"),
+                         encoding="utf-8").read().lower().split())
+
+    # (i) A cadence is prescribed, with the mechanism.
+    assert "build-log.txt" in wiz, "the wizard does not name the log to read"
+    assert "20 to 30 seconds" in wiz or "20-30 second" in wiz, \
+        "no check cadence is given, so a single long sleep is compliant"
+    assert "tail -n" in wiz, "no concrete command for reading the log"
+    assert "relay the newest line" in wiz, \
+        "the wizard does not require saying what changed after each check"
+
+    # (ii) Long single sleeps are ruled out by name, in both documents.
+    assert "120 or 240" in wiz, \
+        "the observed long-sleep defect is not named, so the rule reads as abstract"
+    for name, doc in (("wizard.md", wiz), ("composition-rules.md", comp)):
+        assert "20 to 30 second" in doc or "20 to 30 seconds" in doc, \
+            "%s does not prescribe short sleeps" % name
+    assert "wait on it once" not in comp, \
+        "composition-rules.md still tells the agent to wait once and report, which " \
+        "is what produced the silent 240s sleep"
+
+    # (iii) And the original defect is still forbidden, with its example intact.
+    assert "opening a second connection and counting rows" in wiz, \
+        "the no-polling prohibition is gone"
+    assert "888" in wiz and "19,921" in wiz, \
+        "the invented-ratio example is gone; the rule reads as abstract advice"
+    assert "is not polling" in wiz, \
+        "the wizard does not distinguish reading the log from polling Snowflake"
+
+    # (iv) The rule is worthless if the phases stopped streaming.
+    b = open(os.path.join(ROOT, "pipeline", "build.py"), encoding="utf-8").read()
+    for phase in ("describe", "kb-load", "p1-catalog"):
+        decl = b[b.index('Phase("%s"' % phase) + 1:]
+        nxt = decl.find("\n    Phase(")
+        decl = decl[:nxt] if nxt != -1 else decl[:decl.find("\n]")]
+        assert "stream=True" in decl, (
+            "the wizard tells the agent to read streamed output, but the %s phase "
+            "does not stream" % phase)
+    print("  progress is reported every 20-30s from the log, never from Snowflake")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -1263,7 +1289,6 @@ if __name__ == "__main__":
     test_the_parse_creates_its_output_directory()
     test_the_wizard_hands_over_the_digest_before_asking_what_to_build()
     test_the_digest_does_not_claim_a_build_is_running_when_none_is()
-    test_the_wizard_forbids_polling_for_progress()
     test_the_build_writes_a_log_the_user_can_read_while_it_runs()
     test_composed_apps_are_handed_over_not_auditioned()
     test_the_wizard_asks_how_to_name_the_objects()
@@ -1276,3 +1301,4 @@ if __name__ == "__main__":
     test_composed_column_references_are_checkable_and_checked()
     test_the_app_wiring_rules_are_documented()
     test_the_model_specific_boundary_is_documented_and_accurate()
+    test_the_wizard_reports_progress_often_without_polling_snowflake()

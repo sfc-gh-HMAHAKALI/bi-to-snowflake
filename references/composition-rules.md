@@ -366,12 +366,16 @@ guessing at which errors might occur. Tell them:
 Both surfaces are source in the workspace, so a fix is an edit and a refresh, not a
 rebuild.
 
-### Do not wait forever
+### Waiting on a long command
 
-If a command has to be waited on, wait on it once with a bounded sleep and then report.
-Do not loop `sleep`/check indefinitely, and do not re-run a check hoping for a different
-answer. The build's own log (`pipeline/out/build-log.txt`) is the progress report -- give
-the user the path and let them watch it rather than narrating from repeated polls.
+Sleep in short steps -- 20 to 30 seconds -- and say what changed after each one, reading
+`pipeline/out/build-log.txt` rather than querying Snowflake. A single `sleep 240` leaves
+the user with nothing between "starting" and "done", which is exactly what the streamed
+narration exists to prevent; giving them the log path does not discharge the obligation
+to tell them what is happening, it just means they can check your work.
+
+What to avoid is an *unbounded* loop and re-running a check hoping for a different
+answer. Frequent short checks that each report something are the opposite of that.
 
 ## Honest labelling
 
