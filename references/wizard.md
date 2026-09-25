@@ -292,7 +292,11 @@ So the run shape is three steps, and the third is opt-in:
 python3 pipeline/build.py --extract "<model>" --all --deploy none
 
 # 2. Compose both surfaces against the measured inventory (see composition-rules.md).
-#    Nothing to run here -- this is the authoring step.
+#    Nothing to run here -- this is the authoring step. Measure and make every shared
+#    decision FIRST, then compose the two surfaces in parallel, one subagent each:
+#    they share no files, and serial composition is the largest avoidable block of
+#    wall clock in a run (~790s for the pair). Forking before the decisions are made
+#    lets the two agents choose differently, which is worse than being slow.
 
 # 3. Only if the user asked for hosting on Snowflake:
 python3 pipeline/build.py --paths 4 --deploy streamlit --skip-physical

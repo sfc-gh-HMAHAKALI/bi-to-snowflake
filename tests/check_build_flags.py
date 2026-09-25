@@ -1268,6 +1268,48 @@ def test_the_wizard_reports_progress_often_without_polling_snowflake() -> None:
     print("  progress is reported every 20-30s from the log, never from Snowflake")
 
 
+def test_the_two_surfaces_are_composed_in_parallel_after_deciding() -> None:
+    """Composition order was left unspecified, so it varied run to run.
+
+    One run composed Streamlit and React in parallel, the next did them serially --
+    the same instructions both times, because nothing said which. Serial composition
+    is the largest avoidable block of wall clock in a run, about 790s for the pair.
+
+    But parallelism is only safe after the shared decisions are made. Two agents each
+    measuring and each choosing produce a Streamlit KPI band ordered one way and a
+    React band ordered another, or a panel kept on one surface and dropped on the
+    other: both render, both look plausible, and the claim that they are one report in
+    two technologies is broken in the exact way a side-by-side demo exposes.
+    """
+    comp = open(os.path.join(ROOT, "references", "composition-rules.md"),
+                encoding="utf-8").read()
+    low = " ".join(comp.lower().split())
+    wiz = " ".join(open(os.path.join(ROOT, "references", "wizard.md"),
+                        encoding="utf-8").read().lower().split())
+
+    # (i) Parallel composition is prescribed, in both the rules and the run shape.
+    assert "in parallel" in low, \
+        "composition-rules.md does not say to compose the two surfaces in parallel"
+    assert "in parallel" in wiz, \
+        "the wizard's run shape does not mention parallel composition"
+    assert "subagent" in low, "the mechanism (one subagent per surface) is not named"
+
+    # (ii) The decisions must come FIRST -- that is what makes it safe.
+    assert "decide once" in low, "the decide-then-fork ordering is not stated"
+    decide = low.index("decide once")
+    fork = low.index("fork two subagents")
+    assert decide < fork, "the rules describe forking before deciding"
+    assert "choose differently" in low or "diverging decisions" in low, (
+        "the rules do not say what goes wrong if the surfaces are composed before "
+        "the shared decisions are made, so the ordering reads as ceremony")
+
+    # (iii) Independence is justified, not asserted -- the directories differ.
+    for path in ("pipeline/app_streamlit/", "pipeline/app_react/"):
+        assert path in comp, \
+            "the rules do not show that %s is written by only one surface" % path
+    print("  both surfaces are composed in parallel, after the shared decisions")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -1302,3 +1344,4 @@ if __name__ == "__main__":
     test_the_app_wiring_rules_are_documented()
     test_the_model_specific_boundary_is_documented_and_accurate()
     test_the_wizard_reports_progress_often_without_polling_snowflake()
+    test_the_two_surfaces_are_composed_in_parallel_after_deciding()

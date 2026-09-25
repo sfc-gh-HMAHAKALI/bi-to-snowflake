@@ -41,6 +41,37 @@ Both mean magnitude has to be **measured, not inferred**: run one `SELECT` of ca
 measure totals against the semantic view before composing, and rank on the result. That
 query is part of composition, not of page render.
 
+## Decide once, then compose both surfaces in parallel
+
+The two surfaces are genuinely independent work: Streamlit composes against
+`assets/streamlit_ui/` into `pipeline/app_streamlit/`, React against
+`assets/react_ui/` into `pipeline/app_react/`. No file is shared and neither reads the
+other's output. Composing them one after the other is the single largest block of wall
+clock in a run -- measured at around 790 seconds for the pair -- and roughly half of
+that is avoidable.
+
+**So: make every shared decision first, write it down, then fork one subagent per
+surface.** The order matters more than the parallelism.
+
+1. **Measure and decide, once.** Run the candidate-measure totals query, pick the KPI
+   band and its order, choose which views are viable and which are dropped and why,
+   and pick the chart for each panel. This is the step the Inputs section above
+   describes, and it must finish before either surface is written.
+2. **Record the decisions** -- KPIs in order, views kept, views dropped with the reason,
+   chart per panel, drill levels per hierarchy. A few lines is enough.
+3. **Fork two subagents**, one per surface, each given that record and told to write
+   only its own directory.
+4. **Then run `verify_composition.py` once**, over both.
+
+Skipping step 1 and forking straight into composition is the failure mode to avoid: the
+two agents each measure and each choose, and they choose differently. The result is a
+Streamlit KPI band ordered by one ranking and a React band ordered by another, or a
+territory panel present on one surface and dropped on the other. Both surfaces render,
+both look plausible, and the promise that they are the same report in two technologies
+is quietly broken -- which is the one thing a side-by-side demo makes obvious.
+
+Serial composition is not wrong, only slower. Diverging decisions are wrong.
+
 ## Deriving views
 
 A view is a page tab. Derive them in this order and stop at eight.
