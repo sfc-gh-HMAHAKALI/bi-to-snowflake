@@ -1048,6 +1048,52 @@ def test_the_slowest_phase_does_not_look_like_a_hang() -> None:
     print("  the slowest phase announces each batch before running it, unbuffered")
 
 
+def test_catalog_comments_and_tags_are_batched_per_table() -> None:
+    """The Horizon phase's cost is statement COUNT, not statement length.
+
+    Each statement is a serial round trip of roughly 0.67s, so one COMMENT ON COLUMN
+    per column made this the slowest phase in the build at ~200s. Snowflake accepts a
+    list of column clauses in a single ALTER TABLE -- verified against a live 100
+    column table, 12.6KB in one statement, all 100 comments applied -- so the same
+    work is one round trip per table.
+    """
+    src = open(os.path.join(ROOT, "pipeline", "path1_catalog_glossary.py"),
+               encoding="utf-8").read()
+
+    # Test what the code EMITS, not what it mentions: the explanatory comment above
+    # the batching names the old per-column form, and a naive source scan for that
+    # string fails on the very comment that documents the fix.
+    emitted = "\n".join(l for l in src.splitlines()
+                        if not l.lstrip().startswith("#"))
+    assert "COMMENT ON COLUMN" not in emitted, \
+        "column comments are still emitted one statement per column"
+    assert 'MODIFY COLUMN "' not in emitted, \
+        "column tags are still emitted one statement per column"
+    for shape in ("ALTER TABLE %s ALTER", "ALTER TABLE %s MODIFY"):
+        assert shape in src, "the batched %r form is missing" % shape
+
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    try:
+        import path1_catalog_glossary as P
+    finally:
+        sys.path.pop(0)
+
+    # Bounded, so one wide table cannot build a single unbounded statement whose
+    # failure names no column.
+    assert 1 < P._CLAUSES_PER_STATEMENT <= 250, \
+        "the clause cap is missing or implausible: %r" % P._CLAUSES_PER_STATEMENT
+    assert len(list(P._chunks(["x"] * 25, P._CLAUSES_PER_STATEMENT))) == 1, \
+        "a normal-width table should still be a single round trip"
+    n = P._CLAUSES_PER_STATEMENT * 2 + 1
+    assert len(list(P._chunks(["x"] * n, P._CLAUSES_PER_STATEMENT))) == 3, \
+        "chunking does not split a table wider than the cap"
+    # No clause may be dropped or duplicated by the chunking.
+    items = [str(i) for i in range(257)]
+    flat = [c for batch in P._chunks(items, P._CLAUSES_PER_STATEMENT) for c in batch]
+    assert flat == items, "chunking loses or reorders column clauses"
+    print("  catalog comments and tags batch per table, bounded, losing no clause")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -1078,3 +1124,4 @@ if __name__ == "__main__":
     test_naming_rejects_values_that_cannot_be_identifiers()
     test_v10_defects()
     test_the_slowest_phase_does_not_look_like_a_hang()
+    test_catalog_comments_and_tags_are_batched_per_table()

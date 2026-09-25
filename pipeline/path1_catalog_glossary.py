@@ -91,6 +91,20 @@ def query_json(sql: str, connection: str) -> list[dict]:
         os.unlink(path)
 
 
+# Column clauses per ALTER TABLE. This phase's cost is the number of statements,
+# not their length -- each is a serial round trip of roughly 0.67s -- so the ideal
+# is one statement per table. Capped anyway: a wide table with long definitions
+# would otherwise build a single statement of unbounded size, and a failure in one
+# enormous statement tells you nothing about which column caused it. 100 keeps the
+# saving (a 25-column table is still one round trip) while bounding the blast radius.
+_CLAUSES_PER_STATEMENT = 100
+
+
+def _chunks(items: list[str], n: int):
+    for i in range(0, len(items), n):
+        yield items[i:i + n]
+
+
 def _lit(s: str | None) -> str:
     if s is None:
         return "''"
@@ -213,7 +227,14 @@ def generate_comments(connection: str, database: str) -> str:
     out.append("")
     # Column comments are the bulk of the value: this is what makes a warehouse
     # searchable by business vocabulary rather than by column name.
+    #
+    # Grouped one ALTER TABLE per table rather than one COMMENT ON COLUMN per column.
+    # Snowflake accepts an arbitrary list of column clauses in a single ALTER, and
+    # each statement is a serial round trip costing roughly 0.67s, so this phase's
+    # cost is set by statement COUNT, not by how much text each carries. On the
+    # reference model that is the difference between ~280 statements and a few dozen.
     seen: set[tuple] = set()
+    per_table: dict[str, list[str]] = {}
     for c in col_rows:
         key = (c["PHYSICAL_SCHEMA"], c["PHYSICAL_OBJECT"], c["PHYSICAL_COLUMN"])
         if key in seen or key not in have_cols:
@@ -226,9 +247,12 @@ def generate_comments(connection: str, database: str) -> str:
         note = f'[{c["TERM_ROLE"]}] {defn}'
         if c["TERM_NAME"] != c["PHYSICAL_COLUMN"]:
             note += f' (BI name: {c["TERM_NAME"]})'
-        out.append(
-            f'COMMENT ON COLUMN {fq}."{c["PHYSICAL_COLUMN"]}" IS {_lit(note)};'
+        per_table.setdefault(fq, []).append(
+            f'  COLUMN "{c["PHYSICAL_COLUMN"]}" COMMENT {_lit(note)}'
         )
+    for fq, clauses in per_table.items():
+        for batch in _chunks(clauses, _CLAUSES_PER_STATEMENT):
+            out.append("ALTER TABLE %s ALTER\n%s;" % (fq, ",\n".join(batch)))
     return "\n".join(out)
 
 
@@ -295,7 +319,11 @@ def generate_tags(connection: str, database: str) -> str:
         )
 
     out.append("")
+    # Same batching as the column comments, and for the same reason: one round trip
+    # per table instead of one per column. Tag clauses for several columns are legal
+    # in a single ALTER TABLE, verified against Snowflake before relying on it.
     seen_c: set[tuple] = set()
+    per_table: dict[str, list[str]] = {}
     for c in rows:
         key = (c["PHYSICAL_SCHEMA"], c["PHYSICAL_OBJECT"], c["PHYSICAL_COLUMN"])
         if key in seen_c or key not in have_cols:
@@ -305,10 +333,12 @@ def generate_tags(connection: str, database: str) -> str:
         parts = [f'{KB}.TERM_ROLE = {_lit(c["TERM_ROLE"])}']
         if c.get("RISK"):
             parts.append(f'{KB}.SEMANTIC_RISK = {_lit(c["RISK"])}')
-        out.append(
-            f'ALTER TABLE {fq} MODIFY COLUMN "{c["PHYSICAL_COLUMN"]}" '
-            f'SET TAG {", ".join(parts)};'
+        per_table.setdefault(fq, []).append(
+            f'  COLUMN "{c["PHYSICAL_COLUMN"]}" SET TAG {", ".join(parts)}'
         )
+    for fq, clauses in per_table.items():
+        for batch in _chunks(clauses, _CLAUSES_PER_STATEMENT):
+            out.append("ALTER TABLE %s MODIFY\n%s;" % (fq, ",\n".join(batch)))
     return "\n".join(out)
 
 
