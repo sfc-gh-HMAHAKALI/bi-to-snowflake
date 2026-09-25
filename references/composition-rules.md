@@ -269,6 +269,63 @@ pass every local test.
   directory and the result is a `MODULE_NOT_FOUND` through `webpack-runtime.js` with nothing
   wrong in the source. Stop the dev server, `rm -rf .next`, rebuild.
 
+## Wiring the app to Snowflake -- four things that are not judgement calls
+
+Measured breakages, all of them silent or fatal-on-first-run.
+
+- **Column names come from the RPT_ views, not from the semantic model.** The views are
+  queried with `SELECT *`, so the row keys are the views' physical column names. The
+  semantic model's logical names are *different* and composing from them produced
+  `FISCAL_QUARTER_LABEL`, `SALES_AMOUNT`, `BOOKED_AMOUNT`, `GPC1_DESCRIPTION` and
+  `TERRITORY_L1` against real columns `FISCAL_QUARTER_YEAR`, `SALES_AMOUNT_TOTAL`,
+  `BOOKED_AMOUNT_TOTAL`, `GPC1` and `TERRITORY_LEVEL1`. Nothing raised: the query
+  succeeded, the component got a key that was not in the row, and every chart rendered
+  empty. The authoritative list is `pipeline/sql/45_reporting_views.sql`, which declares
+  every column statically. **Run the checker after composing, before handing over:**
+
+  ```bash
+  python3 pipeline/verify_composition.py
+  ```
+
+  Under a second, no connection needed, and it names the file, line and nearest real
+  column. This is one of the two checks that survive the hand-over rule.
+
+- **`ASK_<PREFIX>_ANALYST` is a stored procedure. Use `CALL`, not `SELECT`.**
+  `SELECT DB.ANALYTICS.ASK_X_ANALYST(...)` fails with "Unknown user-defined function"
+  and takes the whole agent panel with it. `CALL` also names its result column after the
+  procedure rather than any alias you write, so read the first column positionally.
+
+- **The procedure returns a VARIANT object, not a string.** It returns
+  `{answer, sql, error}`. `str(row[0])` yields the raw JSON text, and regex-hunting a
+  markdown code fence in it finds nothing because there is no markdown -- it is
+  structured data. Parse it and read `.answer` and `.sql` directly; the connector
+  usually hands back a dict already, so accept either and `json.loads` only a string.
+
+- **Locally, do not use `st.connection("snowflake")`.** It resolves the connection
+  named `default`, and most users' connections are named something else, so the app
+  dies at import with `Invalid connection_name 'default'`. For `--deploy none`, connect
+  with `snowflake.connector.connect(connection_name=CONNECTION_NAME)` and set
+  `CONNECTION_NAME` from the connection the wizard already collected. Reserve
+  `st.connection` for Streamlit-in-Snowflake, where `default` is correct.
+
+### Give the React app its environment
+
+`lib/snowflake.ts` needs `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_WAREHOUSE`, and one of
+`SNOWFLAKE_TOKEN_FILE` or `SNOWFLAKE_PAT`. Without them the app starts and then fails
+with "Set SNOWFLAKE_HOST or SNOWFLAKE_ACCOUNT" and "You must specify the warehouse",
+which reads as a broken build rather than missing configuration. **Write
+`pipeline/app_react/.env.local` as part of composing**, with the values derived from
+what is already known: account from `CURRENT_ORGANIZATION_NAME()`/`CURRENT_ACCOUNT_NAME()`
+or the connection, warehouse from the build's connection, database and schema from the
+naming. Then the start command is `npm install && npm run dev` with nothing to explain.
+
+### Put the analyst where people will find it
+
+The agent panel belongs on its own top-level tab, composed as `render_analyst()` and
+added to the sidebar navigation. Appending it to the bottom of the Provenance view --
+which is where it ended up once -- buries the single most demonstrable feature in the
+tab users open least.
+
 ## Hand the app over -- do not audition it
 
 The two sections above exist so the defects they describe never reach the composed app.
@@ -286,6 +343,7 @@ could have had in their hands.
 | Check | Cost | Why it stays |
 |---|---|---|
 | Every file in `STREAMLIT_SOURCE` and `REACT_SOURCE` exists | instant, already in preflight | a missing library module is an `ImportError` on line 1 while `SHOW STREAMLITS` looks healthy |
+| `python3 pipeline/verify_composition.py` | under a second, no connection | a chart keyed on a column the view does not expose renders empty and raises nothing |
 | `python3 -m py_compile` on each composed Streamlit page | under a second | a syntax error is not something the user should discover |
 
 **Do none of these:** `npm run build`, `next dev`, `streamlit run`, opening a browser,

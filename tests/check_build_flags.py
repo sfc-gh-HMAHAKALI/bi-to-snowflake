@@ -9,6 +9,7 @@ import subprocess
 import sys
 import io
 import tempfile
+import contextlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -1094,6 +1095,82 @@ def test_catalog_comments_and_tags_are_batched_per_table() -> None:
     print("  catalog comments and tags batch per table, bounded, losing no clause")
 
 
+def test_composed_column_references_are_checkable_and_checked() -> None:
+    """v11 bug 1: composed charts named columns the reporting views do not expose.
+
+    FISCAL_QUARTER_LABEL, SALES_AMOUNT, BOOKED_AMOUNT, GPC1_DESCRIPTION, TERRITORY_L1
+    against real columns FISCAL_QUARTER_YEAR, SALES_AMOUNT_TOTAL, BOOKED_AMOUNT_TOTAL,
+    GPC1, TERRITORY_LEVEL1. Nothing raised -- the query succeeded, the component got a
+    key that was not in the row, and every chart rendered empty. A rule alone cannot
+    fix this; the checker can, because the views declare their columns statically.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    try:
+        import verify_composition as V
+    finally:
+        sys.path.pop(0)
+
+    sql = open(os.path.join(ROOT, "pipeline", "sql", "45_reporting_views.sql"),
+               encoding="utf-8").read()
+    views = V.view_columns(sql)
+    declared = re.findall(r"CREATE OR REPLACE VIEW\s+(RPT_\w+)", sql)
+    assert set(views) == set(declared), (
+        "the parser misses reporting views, so real columns would be reported as "
+        "unknown: %s" % (set(declared) - set(views)))
+    known = set().union(*views.values())
+
+    # The real names must be recognised, and the fabricated ones must not be.
+    for real in ("FISCAL_QUARTER_YEAR", "SALES_AMOUNT_TOTAL", "BOOKED_AMOUNT_TOTAL",
+                 "GPC1", "TERRITORY_LEVEL1", "STRANDED_USD"):
+        assert real in known, "%s is a real column but the parser missed it" % real
+    for fake in ("FISCAL_QUARTER_LABEL", "SALES_AMOUNT", "BOOKED_AMOUNT",
+                 "GPC1_DESCRIPTION", "TERRITORY_L1"):
+        assert fake not in known, \
+            "%s does not exist but the parser accepts it, so the check is inert" % fake
+
+    # End to end on the actual defect, including that a valid reference passes.
+    tmp = tempfile.mkdtemp()
+    react = os.path.join(tmp, "app_react")
+    os.makedirs(react)
+    with open(os.path.join(react, "report.tsx"), "w", encoding="utf-8") as fh:
+        fh.write('<LineChart xKey="FISCAL_QUARTER_LABEL" yKey="SALES_AMOUNT_TOTAL" />\n')
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = V.main(["--app-react", react, "--app-streamlit", os.path.join(tmp, "none")])
+    assert rc == 1, "the checker passed a fabricated column name"
+    with open(os.path.join(react, "report.tsx"), "w", encoding="utf-8") as fh:
+        fh.write('<LineChart xKey="FISCAL_QUARTER_YEAR" yKey="SALES_AMOUNT_TOTAL" />\n')
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = V.main(["--app-react", react, "--app-streamlit", os.path.join(tmp, "none")])
+    assert rc == 0, "the checker rejects valid column names"
+
+    # And the rules must actually tell composition to run it.
+    comp = " ".join(open(os.path.join(ROOT, "references", "composition-rules.md"),
+                         encoding="utf-8").read().lower().split())
+    assert "verify_composition.py" in comp, \
+        "composition-rules.md never tells anyone to run the checker"
+    print("  composed column references are validated against the reporting views")
+
+
+def test_the_app_wiring_rules_are_documented() -> None:
+    """v11 bugs 2-6: each one silent or fatal on first run, none a judgement call."""
+    comp = " ".join(open(os.path.join(ROOT, "references", "composition-rules.md"),
+                         encoding="utf-8").read().lower().split())
+    for phrase, why in (
+        ("use `call`, not `select`",
+         "bug 2: SELECT on the ASK procedure fails as an unknown UDF"),
+        ("variant object, not a string",
+         "bug 4: str(row[0]) yields raw JSON and the markdown regex finds nothing"),
+        ('do not use `st.connection("snowflake")`',
+         "bug 3: it resolves the connection named 'default' and the app dies at import"),
+        (".env.local",
+         "bug 6: the React app needs account, warehouse and a token to start"),
+        ("render_analyst()",
+         "bug 5: the agent panel was buried at the bottom of the Provenance tab"),
+    ):
+        assert phrase in comp, "composition-rules.md does not cover %s" % why
+    print("  the CALL, VARIANT, local-connection, env and analyst-tab rules are stated")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -1125,3 +1202,5 @@ if __name__ == "__main__":
     test_v10_defects()
     test_the_slowest_phase_does_not_look_like_a_hang()
     test_catalog_comments_and_tags_are_batched_per_table()
+    test_composed_column_references_are_checkable_and_checked()
+    test_the_app_wiring_rules_are_documented()
