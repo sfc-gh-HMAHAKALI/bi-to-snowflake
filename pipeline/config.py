@@ -26,6 +26,13 @@ import os
 import re
 from dataclasses import dataclass, asdict, field
 
+# Unquoted Snowflake identifier: letter or underscore, then letters, digits,
+# underscores or dollar signs. Deliberately stricter than Snowflake itself, which
+# allows anything inside double quotes -- nothing in this pipeline quotes its
+# generated identifiers, and adding quoting to ~850 DDL sites to support a prefix
+# with a space in it would be a poor trade.
+_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+
 
 @dataclass(frozen=True)
 class Naming:
@@ -46,6 +53,51 @@ class Naming:
     prefix: str = "BI"
     model_name: str = "SALES_BOOKINGS"
     model_label: str = "BI Model"
+
+    def __post_init__(self) -> None:
+        """Reject anything that cannot be a Snowflake identifier.
+
+        Every name below is concatenated into unquoted DDL, so a value that is not a
+        legal identifier does not fail here -- it fails partway through a build with a
+        SQL syntax error, after earlier phases have already committed.
+
+        This became a user-facing input path when the wizard started asking for the
+        prefix and model name, but it was already reachable: passing ``--prefix ''``
+        was accepted silently and produced ``ASK__ANALYST`` with a doubled underscore,
+        which is a legal identifier and so failed only at the verifier, reported as a
+        naming mismatch in the verifier rather than as bad input to the build.
+        """
+        for field_name in ("prefix", "model_name", "database", "kb_database",
+                           "kb_schema", "analytics_schema"):
+            value = getattr(self, field_name)
+            flag = "--" + field_name.replace("_", "-")
+            if not value or not value.strip():
+                raise ValueError(
+                    "%s cannot be empty. An empty prefix produces names like "
+                    "ASK__ANALYST, which are legal identifiers, so the build "
+                    "succeeds and only the verifier notices." % flag)
+            if not _IDENTIFIER.match(value):
+                raise ValueError(
+                    "%s=%r is not a usable Snowflake identifier. Letters, digits "
+                    "and underscores only, starting with a letter or underscore -- "
+                    "it is concatenated into unquoted DDL, so %r would fail mid-build "
+                    "with a SQL syntax error." % (flag, value, value))
+            # The longest suffix any property appends is _GLOSSARY_SEARCH (16), and
+            # app_service/compute_pool prepend the database and an underscore.
+            budget = 255 - len(self.database) - 17
+            if field_name in ("prefix", "model_name") and len(value) > budget:
+                raise ValueError(
+                    "%s=%r is too long: with database %r the derived names would "
+                    "exceed Snowflake's 255-character identifier limit."
+                    % (flag, value, self.database))
+        # Snowflake folds unquoted identifiers to upper case, so a lower-case prefix
+        # would be reported back to the user in one case and exist in another. Do that
+        # folding here instead, once, rather than letting the two drift.
+        for field_name in ("prefix", "model_name", "database", "kb_database",
+                           "kb_schema", "analytics_schema"):
+            value = getattr(self, field_name)
+            if value != value.upper():
+                object.__setattr__(self, field_name, value.upper())
 
     @property
     def semantic_view(self) -> str:
@@ -226,7 +278,12 @@ def from_args(args: argparse.Namespace) -> Naming:
             % (DEFAULT.analytics_schema, values["analytics_schema"],
                DEFAULT.analytics_schema, values["analytics_schema"])
         )
-    return Naming(**values)
+    # A bad --prefix is a typo, not a bug. Report it as one line rather than a
+    # traceback through dataclass internals, which reads as a broken pipeline.
+    try:
+        return Naming(**values)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
 
 
 def forward_flags(naming: Naming) -> list[str]:

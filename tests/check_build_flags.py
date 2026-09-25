@@ -902,6 +902,49 @@ def test_the_backend_is_handed_over_with_clickable_urls() -> None:
     print("  the backend is handed over with clickable Snowsight URLs before composition")
 
 
+def test_naming_rejects_values_that_cannot_be_identifiers() -> None:
+    """Now that the wizard asks for the prefix, whatever the user types reaches the DDL.
+
+    Observed: a verifier run reported the agent procedure as ASK__ANALYST and the
+    conclusion drawn was "a naming mismatch in the verifier". It was not -- an empty
+    prefix had been accepted silently, and a doubled underscore is a legal identifier,
+    so the build succeeded and only the verifier noticed. Values with spaces, hyphens
+    or a leading digit are worse: they are not legal identifiers at all and fail
+    mid-build with a SQL syntax error, after earlier phases have committed.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    try:
+        import config as C
+    finally:
+        sys.path.pop(0)
+
+    for bad in ("", "   ", "bi model", "spu-dmr", "2024", "a;DROP", "x" * 250):
+        for fieldname in ("prefix", "model_name"):
+            try:
+                C.Naming(**{fieldname: bad})
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(
+                    "Naming accepted %s=%r, which cannot be an unquoted Snowflake "
+                    "identifier and will fail mid-build" % (fieldname, bad))
+
+    # Legal values still work, and fold to upper case so the name reported matches
+    # the name Snowflake actually creates.
+    n = C.Naming(prefix="rsa", model_name="sales_bookings", database="acme_sales")
+    assert n.prefix == "RSA" and n.model_name == "SALES_BOOKINGS", \
+        "a lower-case prefix is not folded, so the object and the report disagree"
+    assert n.ask_procedure == "ASK_RSA_ANALYST", \
+        "the derived procedure name is wrong: %r" % n.ask_procedure
+    assert "__" not in n.ask_procedure, "a doubled underscore survived validation"
+
+    # And a typo is reported as one line, not a dataclass traceback.
+    src = open(os.path.join(ROOT, "pipeline", "config.py"), encoding="utf-8").read()
+    assert "raise SystemExit(str(exc))" in src, \
+        "a bad --prefix raises a ValueError traceback, which reads as a broken pipeline"
+    print("  naming rejects unusable identifiers and folds case, with a one-line error")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -929,3 +972,4 @@ if __name__ == "__main__":
     test_the_wizard_asks_how_to_name_the_objects()
     test_the_confirmation_is_a_button_not_a_text_prompt()
     test_the_backend_is_handed_over_with_clickable_urls()
+    test_naming_rejects_values_that_cannot_be_identifiers()
