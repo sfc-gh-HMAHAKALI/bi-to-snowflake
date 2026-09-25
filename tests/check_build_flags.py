@@ -1012,6 +1012,42 @@ def test_v10_defects() -> None:
           "F3 empty inserts, F6 connection)")
 
 
+def test_the_slowest_phase_does_not_look_like_a_hang() -> None:
+    """v10: "the log hung up a few times and then suddenly jumped with many lines."
+
+    The Horizon phase is the slowest in the build at ~200s, because object comments
+    and tag assignments are hundreds of serial COMMENT ON / ALTER SET TAG statements.
+    It printed one line per batch AFTER the batch, and the phase did not stream, so
+    its output was captured and arrived all at once at the end -- silence, then a
+    burst. Both halves have to be fixed: announcing before the work is useless if the
+    announcement is still buffered.
+    """
+    b = open(os.path.join(ROOT, "pipeline", "build.py"), encoding="utf-8").read()
+    decl = b[b.index('Phase("p1-catalog"') + 1:]
+    nxt = decl.find("\n    Phase(")
+    decl = decl[:nxt] if nxt != -1 else decl
+    assert "stream=True" in decl, \
+        "the Horizon phase does not stream, so its progress arrives only at the end"
+
+    p1 = open(os.path.join(ROOT, "pipeline", "path1_catalog_glossary.py"),
+              encoding="utf-8").read()
+    run_sql = p1[p1.index("def run_sql("):p1.index("def query_json(")]
+    announce = [l for l in run_sql.splitlines() if ": running" in l]
+    assert announce, \
+        "the batch is not announced before it runs, so the wait stays unexplained"
+    assert "flush=True" in announce[0], (
+        "the announcement is buffered, so streaming the phase still shows nothing "
+        "until the batch finishes -- which is the whole defect")
+    done = [l for l in run_sql.splitlines() if ": ok" in l]
+    assert done and "flush=True" in done[0], "the completion line is buffered"
+    call = run_sql.index("subprocess.run(")
+    assert run_sql.index(announce[0]) < call, \
+        "the announcement is printed after the work it announces"
+    assert run_sql.index(done[0]) > call, \
+        "the completion line no longer follows the work"
+    print("  the slowest phase announces each batch before running it, unbuffered")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -1041,3 +1077,4 @@ if __name__ == "__main__":
     test_the_backend_is_handed_over_with_clickable_urls()
     test_naming_rejects_values_that_cannot_be_identifiers()
     test_v10_defects()
+    test_the_slowest_phase_does_not_look_like_a_hang()

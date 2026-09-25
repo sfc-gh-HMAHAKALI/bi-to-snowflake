@@ -140,8 +140,8 @@ PATH_PHASES: list[Phase] = [
     # Path 1 -- no semantic view, no agent.
     Phase("p1-tags", "Tag taxonomy", "sql", "sql/20_tag_taxonomy.sql", paths=(1,)),
     Phase("p1-catalog", "Horizon comments, tags, glossary, ontology handoff", "py",
-          "path1_catalog_glossary.py", ["--execute"], paths=(1,),
-          note="Regenerates the DDL from the KB each run"),
+          "path1_catalog_glossary.py", ["--execute"], paths=(1,), stream=True,
+          note="Regenerates the DDL from the KB each run; ~200s of serial COMMENT ON"),
 
     # Path 3 -- the semantic layer. Needed by path 4.
     Phase("p3-ossie", "Ossie semantic view (deploy + round-trip)", "py",

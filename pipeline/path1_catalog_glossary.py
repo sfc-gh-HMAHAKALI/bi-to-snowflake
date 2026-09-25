@@ -28,6 +28,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 import config
 
@@ -38,10 +39,26 @@ KB = config.DEFAULT.kb
 
 
 def run_sql(sql: str, connection: str, label: str) -> str:
+    """Run a batch of DDL, announcing it before it starts rather than after.
+
+    This phase is the slowest in the build -- around 200 seconds, because object
+    comments and tag assignments are hundreds of serial COMMENT ON and ALTER ... SET
+    TAG statements and Snowflake takes about 0.67s each. It used to print one "ok"
+    line per batch, after the batch, so the phase produced four lines at the very
+    end and nothing for the three minutes before. Read as a hang, then as a sudden
+    burst of output when everything arrived at once.
+
+    Saying what is about to run, with the statement count, turns the same wait into
+    a stated one. The count is the honest unit here: it is what the duration is
+    proportional to.
+    """
+    n = sql.count(";")
+    print(f"  {label}: running {n} statements (about {n * 0.67:.0f}s)", flush=True)
     with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False, encoding="utf-8") as fh:
         fh.write(sql)
         path = fh.name
     try:
+        started = time.monotonic()
         proc = subprocess.run(
             ["snow", "sql", "-f", path, "-c", connection], capture_output=True, text=True
         )
@@ -49,7 +66,7 @@ def run_sql(sql: str, connection: str, label: str) -> str:
             raise RuntimeError(
                 f"{label} failed:\n{(proc.stdout or '')[-4000:]}{(proc.stderr or '')[-4000:]}"
             )
-        print(f"  {label}: ok")
+        print(f"  {label}: ok ({time.monotonic() - started:.0f}s)", flush=True)
         return proc.stdout
     finally:
         os.unlink(path)
