@@ -865,6 +865,43 @@ def test_the_wizard_asks_how_to_name_the_objects() -> None:
     print("  the wizard asks how to name objects, shows a preview, derives defaults from the model")
 
 
+def test_the_confirmation_is_a_button_not_a_text_prompt() -> None:
+    """The confirmation gate is a yes/no decision. A text prompt invites a paragraph."""
+    wiz = open(os.path.join(ROOT, "references", "wizard.md"), encoding="utf-8").read()
+    low = wiz.lower()
+    assert "ask_user_question" in low[low.index("confirmation gate"):], \
+        "the confirmation gate is not presented as a radio-button question"
+    assert '"proceed"' in low, \
+        "there is no 'Proceed' option in the confirmation question"
+    assert '"change something"' in low, \
+        "there is no 'Change something' option — the user can only accept, not revise"
+    print("  the confirmation gate is a radio button, not a text prompt")
+
+
+def test_the_backend_is_handed_over_with_clickable_urls() -> None:
+    """The backend finishes minutes before the dashboards. Handing it over with URLs
+    lets the user explore the agent and semantic view while composition runs."""
+    wiz = open(os.path.join(ROOT, "references", "wizard.md"), encoding="utf-8").read()
+    low = wiz.lower()
+
+    # (i) The URL patterns are documented.
+    assert "app.snowflake.com" in wiz, \
+        "wizard.md does not include the Snowsight URL pattern"
+    assert "semantic-view" in low, \
+        "the semantic view URL pattern is missing"
+    assert "#/agents/" in low, \
+        "the agent playground URL pattern is missing"
+
+    # (ii) The handoff happens before composition, not after.
+    assert "while i compose" in low or "while you compose" in low or "while the" in low, \
+        "the handoff does not say the user gets the backend while composition runs"
+
+    # (iii) The org/account lookup is documented.
+    assert "current_organization_name" in low, \
+        "wizard.md does not say how to get the org name for the URL"
+    print("  the backend is handed over with clickable Snowsight URLs before composition")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -890,3 +927,5 @@ if __name__ == "__main__":
     test_the_build_writes_a_log_the_user_can_read_while_it_runs()
     test_composed_apps_are_handed_over_not_auditioned()
     test_the_wizard_asks_how_to_name_the_objects()
+    test_the_confirmation_is_a_button_not_a_text_prompt()
+    test_the_backend_is_handed_over_with_clickable_urls()

@@ -461,6 +461,22 @@ Plan: <N> phases, roughly <N> minutes cold.
 Proceed?
 ```
 
+**Use a radio button, not a text prompt.** The confirmation gate is a yes/no decision, not a
+free-form answer. Present it with `ask_user_question`:
+
+```yaml
+ask_user_question:
+  - header: "Confirm"
+    question: "<the full confirmation summary above, as the question text>"
+    options:
+      - label: "Proceed"
+        description: "Start the build with the settings shown above."
+      - label: "Change something"
+        description: "Go back and change the database, naming, paths or deploy mode."
+```
+
+If they pick "Change something", ask what — do not re-run the whole wizard.
+
 Name the schemas that actually receive objects, not a schema the user typed. The gate's
 whole purpose is to state the cost and the location before anything is created, so a wrong
 location here is worse than no gate.
@@ -543,7 +559,41 @@ opening. Waiting is the correct behaviour.
 
 ## After the build
 
-Report what was created with fully qualified names and URLs, then run the verifier:
+### Hand over the backend with clickable links before composing
+
+The backend build finishes minutes before the dashboards are composed. **Give the user
+the live objects immediately, with Snowsight URLs, so they can explore the agent and
+semantic view while you compose the apps.** This is the most valuable handoff in the
+whole run — the backend is verified, the agent works, and the user is otherwise waiting.
+
+Build the Snowsight URLs from `CURRENT_ORGANIZATION_NAME()` and `CURRENT_ACCOUNT_NAME()`:
+
+```
+https://app.snowflake.com/<ORG>/<ACCT>/#/data/databases/<DB>/schemas/ANALYTICS/semantic-view/<SEMANTIC_VIEW>
+```
+
+For the agent, the playground URL is:
+```
+https://app.snowflake.com/<ORG>/<ACCT>/#/agents/<DB>.ANALYTICS.<AGENT>
+```
+
+**Hand them over in a message like this:**
+
+> The backend is live. While I compose the dashboards, you can explore:
+>
+> - **[Cortex Agent playground](url)** — ask it a question (try: "What were total sales this fiscal year?")
+> - **[Semantic view](url)** — the YAML and deployed view
+> - **Glossary search** — `<DB>.ANALYTICS.<SEARCH_SERVICE>`
+> - **8 reporting views** in `<DB>.ANALYTICS` (all `RPT_` prefixed)
+>
+> I'm composing the Streamlit and React dashboards now. Both are generated, not tested —
+> a first run may hit a runtime error. Paste it back and I'll fix it.
+
+Getting the org and account is one SQL call — `SELECT CURRENT_ORGANIZATION_NAME(), CURRENT_ACCOUNT_NAME()`.
+You already have a connection open. This adds under a second to the handoff and gives the user something
+real to work with instead of waiting.
+
+Then run the verifier:
 
 ```bash
 python3 pipeline/verify_deployment.py --connection <name> \
