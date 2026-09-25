@@ -148,7 +148,48 @@ ask_user_question:
     question: "Which database should this build into?"
     type: text
     defaultValue: "<from inventory snowflake_target's database, else BI2SF>"
+  - header: "Naming"
+    question: "What should we call everything? This prefix goes in front of every object -- the semantic view, agent, Streamlit app and React app -- so two models can share one account."
+    type: text
+    defaultValue: "<derive from model name: if the model is 'Regional Sales Analysis', suggest RSA. Short, uppercase, no spaces.>"
+  - header: "Model name"
+    question: "What should the semantic view be called? (The prefix above is added automatically, so 'SALES_BOOKINGS' with prefix 'RSA' creates RSA_SALES_BOOKINGS.)"
+    type: text
+    defaultValue: "<derive from model subject: SALES_BOOKINGS, REVENUE, PIPELINE -- whatever the model is about, in one or two words, uppercase with underscores.>"
 ```
+
+**Derive the defaults from the model.** The inventory has the model name and subject matter. Use
+them — if the model is named "Regional Sales Analysis", default to prefix `RSA`, model name
+`SALES_BOOKINGS`. The user can change either or both; whatever they type becomes `--prefix` and
+`--model-name`.
+
+**Show what the names will be before the confirmation gate.** After the user answers, compute
+the derived names and show them:
+
+```
+With prefix "RSA" and model name "SALES_BOOKINGS" in database "ACME_SALES":
+
+  Semantic view:  ACME_SALES.ANALYTICS.RSA_SALES_BOOKINGS
+  Cortex Agent:   ACME_SALES.ANALYTICS.RSA_ANALYST
+  Search service: ACME_SALES.ANALYTICS.RSA_GLOSSARY_SEARCH
+  Streamlit app:  ACME_SALES.ANALYTICS.RSA_REPORT
+  React app:      ACME_SALES_RSA_REPORT  (APPLICATION SERVICE)
+  Knowledge base: ACME_SALES_KB.KNOWLEDGE_BASE
+```
+
+This is not decoration — it is the naming preview that prevents "why is it called BI_REPORT?"
+after a twelve-minute build. The fully-qualified names also tell the user where to find
+everything, which is worth more than the names themselves.
+
+If the user says "just use the defaults" or "that looks fine", proceed. If they change a name,
+update both the `--prefix` and `--model-name` flags accordingly and recompute the preview.
+
+**The human-readable label** (`--model-label`) defaults to the model name from the inventory
+with normal casing and is shown in object comments, the Streamlit page title, and the React
+window title. It is a separate flag because it contains spaces and mixed case, and it is not
+asked as a question — it is derived from the model name. If the user changes the prefix or
+model name to something that no longer matches the model, update the label to match what they
+typed.
 
 **Ask for the database only, never the schema.** The schema names are fixed: the DDL in
 `pipeline/sql/` hardcodes `ANALYTICS`, `SALES_ANALYTICS`, `COMMON_ANALYTICS` and
@@ -409,7 +450,12 @@ Will create in <DATABASE>:
 and in <KB_DATABASE>:
   KNOWLEDGE_BASE    <the 14 knowledge-base tables and their views>
 
-  <one line per selected output, naming the object>
+Objects:
+  Semantic view:  <DATABASE>.ANALYTICS.<PREFIX>_<MODEL_NAME>
+  Cortex Agent:   <DATABASE>.ANALYTICS.<PREFIX>_ANALYST
+  Search service: <DATABASE>.ANALYTICS.<PREFIX>_GLOSSARY_SEARCH
+  Streamlit app:  <DATABASE>.ANALYTICS.<PREFIX>_REPORT
+  React app:      <DATABASE>_<PREFIX>_REPORT  (APPLICATION SERVICE)
 
 Plan: <N> phases, roughly <N> minutes cold.
 Proceed?

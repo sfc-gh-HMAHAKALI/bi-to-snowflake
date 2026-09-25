@@ -831,6 +831,40 @@ def test_composed_apps_are_handed_over_not_auditioned() -> None:
     print("  composed apps are handed over with a caveat, not auditioned for ten minutes")
 
 
+def test_the_wizard_asks_how_to_name_the_objects() -> None:
+    """The naming system already supports --prefix and --model-name, and every
+    derived name (agent, semantic view, streamlit, etc.) cascades. But the wizard
+    never asked -- so everything was called BI_REPORT and BI_ANALYST unless the
+    user happened to know the flags existed. The question is the last missing piece.
+    """
+    wiz = open(os.path.join(ROOT, "references", "wizard.md"), encoding="utf-8").read()
+    low = wiz.lower()
+
+    # (i) The wizard asks for a prefix and a model name.
+    assert "--prefix" in wiz, "wizard.md never mentions --prefix, the primary naming knob"
+    assert "--model-name" in wiz, "wizard.md never mentions --model-name"
+    assert "naming" in low and "prefix" in low, \
+        "the naming question is gone from the wizard"
+
+    # (ii) A preview of the derived names is shown before the confirmation gate.
+    gate_pos = low.index("confirmation gate")
+    assert "semantic view" in low[gate_pos:] and "agent" in low[gate_pos:], \
+        "the confirmation gate does not show what the objects will be called"
+    assert "prefix" in low[gate_pos:] and "analytics" in low[gate_pos:], \
+        "the confirmation gate does not include the fully-qualified names"
+
+    # (iii) The defaults are derived from the model, not hardcoded.
+    assert "derive from model" in low, \
+        "the naming defaults are hardcoded instead of derived from the model"
+
+    # (iv) The model label is derived, not asked as a separate question.
+    assert "--model-label" in wiz, "the human-readable label is not mentioned"
+    assert "derived from the model name" in low, \
+        "the label is asked as a question rather than derived from the model name"
+
+    print("  the wizard asks how to name objects, shows a preview, derives defaults from the model")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -855,3 +889,4 @@ if __name__ == "__main__":
     test_the_wizard_forbids_polling_for_progress()
     test_the_build_writes_a_log_the_user_can_read_while_it_runs()
     test_composed_apps_are_handed_over_not_auditioned()
+    test_the_wizard_asks_how_to_name_the_objects()
