@@ -247,6 +247,52 @@ pass every local test.
   directory and the result is a `MODULE_NOT_FOUND` through `webpack-runtime.js` with nothing
   wrong in the source. Stop the dev server, `rm -rf .next`, rebuild.
 
+## Hand the app over -- do not audition it
+
+The two sections above exist so the defects they describe never reach the composed app.
+That is where the learnings belong: as rules applied while writing the page, not as an
+inspection afterwards. Once the pages are written, **hand them over.**
+
+A measured run spent roughly ten minutes after composition on `npm run build`, starting
+dev servers, re-querying numbers that had already been verified by the backend verifier,
+and reading composed files back. It found nothing that the rules above had not already
+prevented, and the user waited ten minutes for a clean bill of health on something they
+could have had in their hands.
+
+**Do exactly these checks, and no others:**
+
+| Check | Cost | Why it stays |
+|---|---|---|
+| Every file in `STREAMLIT_SOURCE` / `REACT_SOURCE` exists | instant, already in preflight | a missing library module is an `ImportError` on line 1 while `SHOW STREAMLITS` looks healthy |
+| `python3 -m py_compile` on each composed Streamlit page | under a second | a syntax error is not something the user should discover |
+
+**Do none of these:** `npm run build`, `next dev`, `streamlit run`, opening a browser,
+screenshotting, re-running agent questions to confirm answers, re-querying totals the
+backend verifier already checked, or reading composed files back to confirm what was
+just written.
+
+### Say plainly that it may break
+
+Hand over with the caveat, not after eliminating the need for one. The user has CoCo
+open; a runtime error pasted back is a sixty-second fix, and far cheaper than the agent
+guessing at which errors might occur. Tell them:
+
+- The backend is verified -- the views, semantic view, agent and grants were all checked.
+- The two apps are **generated, not tested**. They may hit a runtime error on first run.
+- Paste the error back into CoCo and it will be fixed against the composed source.
+- The likely candidates are known and listed in "Runtime traps" above -- a wrong column
+  name, an import path, or a chart that got an empty frame.
+
+Both surfaces are source in the workspace, so a fix is an edit and a refresh, not a
+rebuild.
+
+### Do not wait forever
+
+If a command has to be waited on, wait on it once with a bounded sleep and then report.
+Do not loop `sleep`/check indefinitely, and do not re-run a check hoping for a different
+answer. The build's own log (`pipeline/out/build-log.txt`) is the progress report -- give
+the user the path and let them watch it rather than narrating from repeated polls.
+
 ## Honest labelling
 
 If a figure is not measured through the semantic view -- a count read from the knowledge

@@ -62,6 +62,13 @@ can match one built by hand.
 
 Composition choices are governed by `references/composition-rules.md`, not by taste.
 
+**Composed apps are handed over, not auditioned.** The rules in that file exist so the
+known defects never reach the page; they are not a checklist to re-verify afterwards.
+Check that the source files exist and that each Streamlit page compiles, then deliver,
+saying plainly that the apps are generated rather than tested and that a runtime error
+pasted back into CoCo is a quick fix. The backend verifier covers the views, semantic
+view, agent and grants -- that is the part that is actually checked.
+
 ## Workflow
 
 The guided wizard, the output selector and the phase graph are documented in

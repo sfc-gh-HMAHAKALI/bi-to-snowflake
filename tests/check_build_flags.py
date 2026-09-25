@@ -782,6 +782,55 @@ def test_the_build_writes_a_log_the_user_can_read_while_it_runs() -> None:
     print("  the build logs to a file, flushed per line, and hands over the path first")
 
 
+def test_composed_apps_are_handed_over_not_auditioned() -> None:
+    """Learnings belong in the composition rules, not in a post-hoc inspection.
+
+    A measured run spent ~10 minutes after composition on `npm run build`, dev servers,
+    re-querying totals the backend verifier had already checked, and reading composed
+    files back. It found nothing the rules had not already prevented. The user waited
+    ten minutes to be told it was fine, when a caveat plus CoCo in their hands is both
+    faster and more useful -- a runtime error pasted back is a sixty-second fix.
+    """
+    comp = " ".join(open(os.path.join(ROOT, "references", "composition-rules.md"),
+                         encoding="utf-8").read().lower().split())
+    wiz = " ".join(open(os.path.join(ROOT, "references", "wizard.md"),
+                        encoding="utf-8").read().lower().split())
+    skill = " ".join(open(os.path.join(ROOT, "SKILL.md"), encoding="utf-8")
+                     .read().lower().split())
+
+    # (i) The rule exists, in the composition doc and in both entry points.
+    for name, doc in (("composition-rules.md", comp), ("wizard.md", wiz),
+                      ("SKILL.md", skill)):
+        assert "audition" in doc, (
+            "%s does not tell the agent to hand the apps over rather than verify "
+            "them; the silence is what the ten-minute self-audit filled" % name)
+
+    # (ii) The expensive things are named as forbidden. Naming them matters: a general
+    # "do not over-verify" is advice, and advice loses to the urge to check.
+    for banned in ("npm run build", "next dev", "streamlit run", "browser"):
+        assert banned in comp, \
+            "composition-rules.md does not explicitly rule out %r after composing" % banned
+
+    # (iii) The cheap checks that DO stay, because they catch the ImportError class of
+    # defect that looks healthy from SHOW STREAMLITS.
+    assert "py_compile" in comp, "the one cheap check worth keeping is not named"
+    assert "streamlit_source" in comp, \
+        "the file-completeness check is not named as the check that stays"
+
+    # (iv) The caveat is required, not optional. Handing over silently is the other
+    # failure mode: the user then discovers a runtime error with no idea it was expected.
+    for phrase in ("generated, not tested", "paste the error back"):
+        assert phrase in comp, \
+            "composition-rules.md does not require telling the user %r" % phrase
+    assert "generated rather than tested" in wiz and "generated rather than tested" in skill, \
+        "the entry points do not carry the caveat, so it depends on reading the rules doc"
+
+    # (v) And no unbounded waiting.
+    assert "do not wait forever" in comp, \
+        "composition-rules.md does not bound how long the agent waits on a command"
+    print("  composed apps are handed over with a caveat, not auditioned for ten minutes")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -805,3 +854,4 @@ if __name__ == "__main__":
     test_the_digest_does_not_claim_a_build_is_running_when_none_is()
     test_the_wizard_forbids_polling_for_progress()
     test_the_build_writes_a_log_the_user_can_read_while_it_runs()
+    test_composed_apps_are_handed_over_not_auditioned()
