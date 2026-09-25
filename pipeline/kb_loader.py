@@ -42,28 +42,58 @@ import config
 
 log = logging.getLogger("kb_loader")
 
-# What each knowledge base table holds, in the reader's terms rather than ours.
+# What each knowledge base table holds: a plain-language name, then a sentence.
 #
-# This phase is the longest in the build -- around two minutes on a large model --
-# and until now it narrated itself as a stream of "<label> ok" lines. Someone
-# watching a progress log for two minutes deserves to know what is being built and
-# why it takes that long, and "KB load" tells them nothing. Every table the loader
-# writes must appear here; tests/check_kb_loader_target.py enforces that, so a new
-# table cannot be added without a sentence explaining it.
-TABLE_PURPOSE: dict[str, str] = {
-    "KB_SOURCE_MODEL": "the model itself -- which BI tool it came from, and when",
-    "KB_ENTITY": "every table and view the BI model exposed, with its grain",
-    "KB_TERM": "the business glossary: every field, its meaning and its formula",
-    "KB_METRIC": "measures, with the aggregation each one is allowed to use",
-    "KB_HIERARCHY": "drill paths, such as territory or product hierarchies",
-    "KB_HIERARCHY_LEVEL": "each level within those drill paths, in order",
-    "KB_GRAIN": "the declared grain of each fact, so joins cannot silently fan out",
-    "KB_AGGREGATION_RULE": "how each measure rolls up, including semi-additive ones",
-    "KB_RELATIONSHIP": "joins between entities, with their cardinality",
-    "KB_SECURITY_RULE": "row-level security filters carried over from the BI model",
-    "KB_SECURITY_MAPPING": "which groups those filters apply to",
-    "KB_LINEAGE": "where every field came from, column by column",
-    "KB_ISSUE": "things worth a human look: duplicate or conflicting definitions",
+# Written for someone running this for the first time, because that is who reads it.
+# An earlier version led with the table name and described it in the vocabulary of the
+# thing being migrated -- "row-level security filters", "grain", "semi-additive",
+# "cardinality". A first-time user watching KB_SECURITY_RULE tick along for seventy
+# seconds has no idea what it is, and the honest reading of that is that the narration
+# was written for its author.
+#
+# The table name is still shown, in brackets, because anyone debugging needs it.
+# Every table the loader writes must appear here; tests/check_kb_loader_target.py
+# enforces that, so a new table cannot be added without an explanation.
+TABLE_PURPOSE: dict[str, tuple[str, str]] = {
+    "KB_SOURCE_MODEL": (
+        "The model itself",
+        "which BI tool this came from, and when it was read"),
+    "KB_ENTITY": (
+        "Tables and views",
+        "every table the BI model made available to report authors"),
+    "KB_TERM": (
+        "Business glossary",
+        "every field, what it means, and how it is calculated"),
+    "KB_METRIC": (
+        "Measures",
+        "the numbers people report on, and how each one is allowed to be totalled"),
+    "KB_HIERARCHY": (
+        "Drill paths",
+        "how you drill down -- region into country into territory, say"),
+    "KB_HIERARCHY_LEVEL": (
+        "Steps within each drill path",
+        "the individual levels, in the order they drill"),
+    "KB_GRAIN": (
+        "What makes a row unique",
+        "recorded so that joining tables cannot silently double-count a total"),
+    "KB_AGGREGATION_RULE": (
+        "How each measure adds up",
+        "summed, averaged, or something special like an end-of-month balance"),
+    "KB_RELATIONSHIP": (
+        "How the tables join",
+        "which tables connect, and whether one row on one side matches many on the other"),
+    "KB_SECURITY_RULE": (
+        "Who can see which rows",
+        "access rules from the BI model -- \"this sales group sees only its own territory\""),
+    "KB_SECURITY_MAPPING": (
+        "Which groups those access rules apply to",
+        "the people side of the rules above: group names matched to what they may see"),
+    "KB_LINEAGE": (
+        "Where each field came from",
+        "traced column by column, so any number on a report can be explained"),
+    "KB_ISSUE": (
+        "Things worth a human look",
+        "definitions that duplicate or contradict each other, found while reading the model"),
 }
 
 
@@ -92,29 +122,33 @@ class LoadProgress:
         self.emit("  Everything downstream is generated from these tables: the")
         self.emit("  physical layer, the semantic view, the governed views, the")
         self.emit("  catalog and the agent.")
-        self.emit("  Two minutes is normal on a large model. Security filters are")
-        self.emit("  usually the slowest table -- there are tens of thousands of them.")
+        self.emit("  Two minutes is normal on a large model. The slowest table by far")
+        self.emit("  is the access rules -- who is allowed to see which rows. Large BI")
+        self.emit("  models carry tens of thousands of these, one per group per")
+        self.emit("  territory, and they are read one batch at a time. A long pause")
+        self.emit("  there is the build working, not the build stuck.")
 
     def table_start(self, table: str) -> None:
         """Announce the table BEFORE it is written.
 
         This is the line that matters. Reporting only on completion meant the
-        longest table -- security filters, around 70 seconds on its own -- showed
+        longest table -- access rules, around 70 seconds on its own -- showed
         nothing at all while it ran, which is precisely the silence this exists to
         remove. Kept narrow so it survives a wrapped terminal pane.
+
+        Leads with the plain-language name and puts the table name in brackets after
+        it, rather than the other way round. A line that opens "KB_SECURITY_RULE"
+        reads, to someone on their first run, like an internal error.
         """
-        self.emit("  [%2d/%d] %s", self.done + 1, self.TOTAL_TABLES, table)
-        self.emit("         %s",
-                  TABLE_PURPOSE.get(table, "no description -- see TABLE_PURPOSE"))
+        label, detail = TABLE_PURPOSE.get(
+            table, (table, "no description -- see TABLE_PURPOSE"))
+        self.emit("  [%2d/%d] %s  (%s)", self.done + 1, self.TOTAL_TABLES, label, table)
+        self.emit("         %s", detail)
 
     def table_done(self, table: str, rows: int) -> None:
         self.done += 1
         self.rows += rows
         self.emit("         -> %s rows  (%s elapsed)", f"{rows:,}", self._elapsed())
-
-    def closing(self) -> None:
-        self.emit("Knowledge base loaded: %s rows across %d tables in %s.",
-                  f"{self.rows:,}", self.done, self._elapsed())
 
     def closing(self) -> None:
         self.emit("Knowledge base loaded: %s rows across %d tables in %s.",

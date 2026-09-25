@@ -335,6 +335,26 @@ def test_the_knowledge_base_load_narrates_itself() -> None:
     stale = sorted(set(K.TABLE_PURPOSE) - written)
     assert not stale, "TABLE_PURPOSE describes tables the loader no longer writes: %s" % stale
 
+    assert all(isinstance(v, tuple) and len(v) == 2 for v in K.TABLE_PURPOSE.values()), \
+        "TABLE_PURPOSE entries must be (plain-language name, sentence) pairs"
+
+    # (i-b) The narration is written for a first-time reader, not for its author.
+    # A run that spends seventy seconds on one table shows that table's line the whole
+    # time, so the words on it are the skill's explanation of itself. These are the
+    # terms a newbie reported as meaningless; none of them belong in a label.
+    JARGON = ("row-level", "rls", "semi-additive", "cardinality", "grain",
+              "merge", "variant", "serial", "fan out", "ddl", "upsert")
+    for table, (label, detail) in K.TABLE_PURPOSE.items():
+        text = (label + " " + detail).lower()
+        hits = sorted({j for j in JARGON if j in text})
+        assert not hits, (
+            "%s is described with internal vocabulary a first-time user will not "
+            "know: %s -- say it in plain words" % (table, hits))
+        assert not label.startswith("KB_"), (
+            "%s leads with its table name, which reads as an internal error on a "
+            "first run; lead with the plain-language name" % table)
+        assert label[:1].isupper(), "%s has no readable label" % table
+
     # (ii) Announced before the write, not only on completion.
     said: list[str] = []
     prog = K.LoadProgress(emit=lambda fmt, *a: said.append(fmt % a))
@@ -352,7 +372,12 @@ def test_the_knowledge_base_load_narrates_itself() -> None:
     ldr._merge("KB_TERM", ["C1"], ["C1"], [[K._sql_str("a")]], "terms")
     joined = "\n".join(said)
     assert "KB_TERM" in joined, "the table was never announced"
-    assert K.TABLE_PURPOSE["KB_TERM"] in joined, "the description was not printed"
+    label, detail = K.TABLE_PURPOSE["KB_TERM"]
+    assert detail in joined, "the description was not printed"
+    assert label in joined, "the plain-language name was not printed"
+    announce = next(s for s in said if "KB_TERM" in s)
+    assert announce.index(label) < announce.index("KB_TERM"), \
+        "the announcement leads with the table name instead of the plain-language name"
     first_announce = next(i for i, s in enumerate(said) if "KB_TERM" in s)
     first_result = next((i for i, s in enumerate(said) if "rows" in s), len(said))
     assert first_announce < first_result, \

@@ -700,6 +700,39 @@ def test_the_digest_does_not_claim_a_build_is_running_when_none_is() -> None:
     print("  the digest's framing matches when it was produced, and defaults to profile")
 
 
+def test_the_wizard_forbids_polling_for_progress() -> None:
+    """The streamed narration is the progress report; guessing at it invents numbers.
+
+    An observed run polled row counts and announced "Security mappings now loading
+    (888 of 19,921)" -- the mapping table's FINAL count against the source model's
+    access-rule count, two unrelated numbers dressed as a ratio. It then decided the
+    static count meant the load had moved on, and kept polling a finished table.
+    """
+    wiz = open(os.path.join(ROOT, "references", "wizard.md"), encoding="utf-8").read()
+    # Collapse wrapping: the rule spans lines, and a heading must not satisfy the check.
+    low = " ".join(wiz.lower().split())
+    body = " ".join(l for l in low.split("### ") if not l.startswith("the build narrates"))
+    assert "rows to infer progress" in low, \
+        "wizard.md does not forbid counting rows to infer build progress"
+    assert "do not poll" in body or "do not open a second connection" in low, \
+        "the no-polling rule survives only as a heading, not as an instruction"
+    assert "888" in wiz and "19,921" in wiz, \
+        "the concrete invented-ratio example is gone; the rule reads as abstract advice"
+    assert "relay those lines" in low, \
+        "wizard.md does not say what to do instead of polling"
+    b = open(os.path.join(ROOT, "pipeline", "build.py"), encoding="utf-8").read()
+    # The rule is worthless if the phases stopped streaming. Bound each declaration by
+    # the next Phase( rather than the first "),": depends_on=("extract",), contains one.
+    for phase in ("describe", "kb-load"):
+        decl = b[b.index('Phase("%s"' % phase) + 1:]
+        nxt = decl.find("\n    Phase(")
+        decl = decl[:nxt] if nxt != -1 else decl[:decl.find("\n]")]
+        assert "stream=True" in decl, (
+            "wizard.md tells the agent to read streamed output, but the %s phase "
+            "does not stream" % phase)
+    print("  the wizard relays streamed progress instead of inventing it from row counts")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -721,3 +754,4 @@ if __name__ == "__main__":
     test_the_parse_creates_its_output_directory()
     test_the_wizard_hands_over_the_digest_before_asking_what_to_build()
     test_the_digest_does_not_claim_a_build_is_running_when_none_is()
+    test_the_wizard_forbids_polling_for_progress()

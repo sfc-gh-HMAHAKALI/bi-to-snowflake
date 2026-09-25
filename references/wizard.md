@@ -456,6 +456,24 @@ Two things to avoid:
   IN SCHEMA` is point-in-time and does not cover views created later. `ON FUTURE VIEWS` is
   rejected outright.
 
+### The build narrates itself -- do not poll Snowflake to guess its progress
+
+The `describe` and `kb-load` phases stream their output line by line. The knowledge base
+load announces every table before it writes it, in plain language, with a running row
+count and elapsed time. **Relay those lines. Do not open a second connection and count
+rows to infer progress.**
+
+Polling produces confident nonsense. An observed run reported *"Security mappings now
+loading (888 of 19,921)"* -- 888 is the **final** row count of the access-group mapping
+table, and 19,921 is the number of access rules in the source model. Two unrelated
+numbers presented as a ratio, so the same line then read *"row count is static at 888,
+the load likely moved on"* and several more polling cycles were spent on a table that
+had already finished. The streamed narration said so directly.
+
+The access-rule table is the long one -- roughly seventy seconds, tens of thousands of
+rows, loaded in batches. Silence there is normal and the narration says as much in its
+opening. Waiting is the correct behaviour.
+
 ## After the build
 
 Report what was created with fully qualified names and URLs, then run the verifier:
