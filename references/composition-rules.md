@@ -263,7 +263,7 @@ could have had in their hands.
 
 | Check | Cost | Why it stays |
 |---|---|---|
-| Every file in `STREAMLIT_SOURCE` / `REACT_SOURCE` exists | instant, already in preflight | a missing library module is an `ImportError` on line 1 while `SHOW STREAMLITS` looks healthy |
+| Every file in `STREAMLIT_SOURCE` and `REACT_SOURCE` exists | instant, already in preflight | a missing library module is an `ImportError` on line 1 while `SHOW STREAMLITS` looks healthy |
 | `python3 -m py_compile` on each composed Streamlit page | under a second | a syntax error is not something the user should discover |
 
 **Do none of these:** `npm run build`, `next dev`, `streamlit run`, opening a browser,

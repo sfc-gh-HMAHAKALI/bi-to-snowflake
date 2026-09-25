@@ -523,8 +523,7 @@ Read `references/composition-rules.md` before generating any page. The libraries
 `assets/` are fixed; pages compose against them and never restyle them.
 
 **Then hand the apps over. Do not audition them.** See "Hand the app over" in
-`composition-rules.md`: the only checks are that every file in `STREAMLIT_SOURCE` /
-`REACT_SOURCE` exists and that each composed Streamlit page compiles. No `npm run
+`composition-rules.md`: the only checks are that every file in `STREAMLIT_SOURCE` and `REACT_SOURCE` exists and that each composed Streamlit page compiles. No `npm run
 build`, no dev server, no browser, no re-querying numbers the verifier already checked.
 Say plainly that the apps are generated rather than tested, that a first run may hit a
 runtime error, and that pasting the error back into CoCo fixes it against the composed
