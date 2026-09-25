@@ -456,6 +456,27 @@ Two things to avoid:
   IN SCHEMA` is point-in-time and does not cover views created later. `ON FUTURE VIEWS` is
   rejected outright.
 
+### Give the user the log path in the message that starts the build
+
+The build prints its first line before doing any work:
+
+```
+Live log: <skill>/pipeline/out/build-log.txt
+```
+
+**Put that path in the message where you launch the build, and say they can open it
+while it runs.** It is written line by line and flushed, so it is readable mid-run.
+
+This is the only channel that reaches the user. Streaming to stdout serves a person
+who typed the command themselves; when the build runs inside a single tool call the
+output is captured and returned only on exit, so a measured 7.7-minute run showed the
+user four sentences of agent prose and none of the narration -- the plain-language
+table descriptions, the row counts, the elapsed times were all produced correctly and
+all sat in a pipe until the build was over. The file is what makes them visible while
+the build is the thing that is happening.
+
+Relay the milestones as well, but do not treat relaying as a substitute for the path.
+
 ### The build narrates itself -- do not poll Snowflake to guess its progress
 
 The `describe` and `kb-load` phases stream their output line by line. The knowledge base

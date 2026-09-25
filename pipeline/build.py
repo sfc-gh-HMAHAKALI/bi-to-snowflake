@@ -737,6 +737,47 @@ def preflight(paths: set[int], with_extract: bool, with_physical: bool,
     return problems
 
 
+class _Tee:
+    """Write every line to the terminal and to a log file at the same time.
+
+    The streaming phases print as they go, which is what a person running this in a
+    terminal needs. It does nothing at all for the far more common case: an agent
+    running the build through a single tool call, where stdout is captured and handed
+    back only when the process exits. A measured run took 7.7 minutes and the user saw
+    four sentences of the agent's own prose -- none of the narration the build had
+    carefully produced, because it was still sitting in a pipe.
+
+    So the narration also goes to a file, flushed line by line, whose path is printed
+    before any work starts. That file is readable while the build runs, which makes it
+    the one channel that works whether a human or an agent is driving.
+    """
+
+    def __init__(self, stream, path: str) -> None:
+        self.stream = stream
+        self.file = open(path, "w", encoding="utf-8", buffering=1)
+
+    def write(self, s: str) -> int:
+        self.stream.write(s)
+        # Unbuffered on our side too: a half-written line in the file at the moment
+        # someone opens it is the whole point of writing it out.
+        self.file.write(s)
+        self.file.flush()
+        return len(s)
+
+    def flush(self) -> None:
+        self.stream.flush()
+        self.file.flush()
+
+    def isatty(self) -> bool:
+        return False
+
+    def close(self) -> None:
+        try:
+            self.file.close()
+        except Exception:
+            pass
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         description="Build the knowledge base and any subset of the four paths",
@@ -791,6 +832,24 @@ def main(argv=None) -> int:
                    with_physical=not args.skip_physical,
                    deploy=args.deploy)
 
+    # Open the live log before the first print, so the plan, the preflight and any
+    # early failure are all in the file rather than only the part after work began.
+    os.makedirs(os.path.join(HERE, "out"), exist_ok=True)
+    log_path = os.path.join(HERE, "out", "build-log.txt")
+    tee = _Tee(sys.stdout, log_path)
+    sys.stdout = tee
+    try:
+        print("Live log: %s" % log_path)
+        print("  Open that file to watch this run. It is written line by line, so it")
+        print("  is readable while the build is still going.")
+        print()
+        return _run(args, plan, paths, log_path)
+    finally:
+        sys.stdout = tee.stream
+        tee.close()
+
+
+def _run(args, plan: list[Phase], paths: set[int], log_path: str) -> int:
     print("=" * 74)
     print("BUILD PLAN")
     print("=" * 74)
@@ -903,6 +962,7 @@ def main(argv=None) -> int:
     # The path as written, relative to the repo root rather than to pipeline/.
     # "wrote out/build_timings.json" sent a reader looking in the wrong directory.
     print("\nwrote %s" % os.path.relpath(timings_path, SKILL_ROOT))
+    print("full transcript: %s" % log_path)
 
     return 0 if all(r["ok"] for r in results) else 1
 

@@ -7,6 +7,8 @@ import inspect
 import ast
 import subprocess
 import sys
+import io
+import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -733,6 +735,53 @@ def test_the_wizard_forbids_polling_for_progress() -> None:
     print("  the wizard relays streamed progress instead of inventing it from row counts")
 
 
+def test_the_build_writes_a_log_the_user_can_read_while_it_runs() -> None:
+    """Streaming to stdout reaches nobody when the build runs inside a tool call.
+
+    A measured 7.7-minute run produced every line of narration correctly and showed the
+    user none of it: stdout was captured and returned on exit. The log file is the only
+    channel that works for both a human at a terminal and an agent driving the build,
+    and it only works if it is flushed per line and its path is given out up front.
+    """
+    src = open(os.path.join(ROOT, "pipeline", "build.py"), encoding="utf-8").read()
+    assert "build-log.txt" in src, "the build writes no readable log"
+
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    try:
+        import build as B
+    finally:
+        sys.path.pop(0)
+
+    # (i) Readable before close, and it grows -- not buffered until exit.
+    probe = os.path.join(tempfile.mkdtemp(), "live.txt")
+    tee = B._Tee(io.StringIO(), probe)
+    try:
+        tee.write("phase 1\n")
+        assert open(probe, encoding="utf-8").read() == "phase 1\n", \
+            "the log is not flushed per line, so it is empty while the build runs"
+        tee.write("phase 2\n")
+        assert open(probe, encoding="utf-8").read().count("\n") == 2, \
+            "the log does not grow during the run"
+    finally:
+        tee.close()
+
+    # (ii) The path is announced before any work, so it is in the launch message.
+    plan_pos = src.index('print("BUILD PLAN")')
+    assert src.index('print("Live log: %s" % log_path)') < plan_pos, \
+        "the log path is printed after the plan; it must come first, before any work"
+
+    # (iii) And the wizard requires handing it over rather than only relaying prose.
+    wiz = " ".join(open(os.path.join(ROOT, "references", "wizard.md"),
+                        encoding="utf-8").read().lower().split())
+    assert "build-log.txt" in wiz, \
+        "wizard.md never names the log file, so the user is never given the path"
+    assert "message where you launch the build" in wiz, \
+        "wizard.md does not require the path in the message that starts the build"
+    assert "not treat relaying as a substitute" in wiz, \
+        "wizard.md lets prose summaries stand in for the log path"
+    print("  the build logs to a file, flushed per line, and hands over the path first")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -755,3 +804,4 @@ if __name__ == "__main__":
     test_the_wizard_hands_over_the_digest_before_asking_what_to_build()
     test_the_digest_does_not_claim_a_build_is_running_when_none_is()
     test_the_wizard_forbids_polling_for_progress()
+    test_the_build_writes_a_log_the_user_can_read_while_it_runs()
