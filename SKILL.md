@@ -69,6 +69,49 @@ saying plainly that the apps are generated rather than tested and that a runtime
 pasted back into CoCo is a quick fix. The backend verifier covers the views, semantic
 view, agent and grants -- that is the part that is actually checked.
 
+## What generalises, and what does not
+
+Worth being exact about. The parse is genuinely general across six BI tools; the build
+on top of it is not general all the way up, and the boundary is narrower than it looks.
+
+**Model-independent — works on any parsed model with no edits:**
+
+| Layer | Derived from |
+|---|---|
+| Parse and inventory | the source file; Cognos, Tableau, Power BI, Looker, Denodo, SAP BO |
+| Knowledge base schema and load | source-agnostic, keyed `(SOURCE_SYSTEM, SOURCE_MODEL, SOURCE_OBJECT_ID)` |
+| Horizon catalog: comments, tags, glossary, ontology | generated from the knowledge base; no entity names hardcoded |
+| Naming, connection preflight, progress narration | model-independent |
+| `verify_composition.py` | parses whatever the reporting views declare |
+
+**Bound to the reference model's star schema.** One list is the pivot:
+`CORE_ENTITIES` in `pipeline/path3_ossie_semantic_view.py` names six tables
+(`FACT_SALES_SUMMARY`, `FACT_BOOKED_SUMMARY`, `DIM_TIME`, `DIM_US_PROD_CUSTOMERS`,
+`TERRITORY_SITE_SALES_PERSON`, `EDW_ORA_COA_PROD_GFP_W_NORA`).
+`generate_physical_layer.py` **imports that same list**, so both the physical layer and
+the semantic view are scoped to those six entities, and everything downstream inherits
+it:
+
+| File | What is model-specific |
+|---|---|
+| `path3_ossie_semantic_view.py` | `CORE_ENTITIES`, per-entity dimension allowlists, filters, grain keys |
+| `generate_physical_layer.py` | imports `CORE_ENTITIES`; columns themselves come from `KB_TERM` |
+| `sql/45_reporting_views.sql` | static; names `SALES_AMOUNT_TOTAL`, `GPC1`-`GPC4`, `TERRITORY_LEVEL1`-`4`, a July-June fiscal calendar |
+| `sql/30_row_access_policy.sql` | territory-hierarchy policy |
+| `sql/12_dimension_data.sql`, `sql/13_fact_data.sql` | demo data for this shape; skipped by `--skip-physical` |
+
+So a different subject area — HR, supply chain — parses correctly, loads a complete and
+useful knowledge base, and gets a full Horizon catalog and glossary. It does **not** get
+a working semantic view, reporting views or dashboards without editing that list and
+writing its own reporting views.
+
+**This is the skill's main generalisation debt, and it is not hidden behind the
+Cognos adapter — it is in the semantic layer.** Deriving `CORE_ENTITIES` from
+`KB_GRAIN` and `KB_RELATIONSHIP` (the facts and the dimensions they join to are both
+already recorded) and generating the reporting views from `KB_METRIC` and
+`KB_HIERARCHY` would remove it. Nothing about the knowledge base blocks that; the
+information is there.
+
 ## Workflow
 
 The guided wizard, the output selector and the phase graph are documented in

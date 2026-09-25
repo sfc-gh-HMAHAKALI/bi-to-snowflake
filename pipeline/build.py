@@ -1019,12 +1019,14 @@ def _run(args, plan: list[Phase], paths: set[int], log_path: str) -> int:
             if empty:
                 ok = False
                 out = ("%s reported success but left these empty: %s\n\n"
-                       "The statements were valid; they matched no rows. For the "
-                       "territory table this means KB_SECURITY_MAPPING held no "
-                       "TERRITORY_LEVEL4 values in dotted form, which usually means "
-                       "the knowledge base load targeted a different database than "
-                       "--kb-database, or the source model declared no row filters."
-                       % (p.title, ", ".join(empty)))
+                       "The statements were valid; they matched no rows. A phase "
+                       "that populates a table from the knowledge base produces "
+                       "nothing when the rows it selects are absent, so check that "
+                       "the knowledge base load ran against --kb-database %r and "
+                       "that the source model actually declares what this phase "
+                       "reads.\n%s"
+                       % (p.title, ", ".join(empty), NAMING.kb_database,
+                          ("Phase note: %s" % p.note) if p.note else ""))
         results.append({"phase": p.key, "title": p.title, "ok": ok, "seconds": round(dt, 1)})
         if p.stream:
             print(f"      -> {'ok' if ok else 'FAILED'}  {dt:6.1f}s")

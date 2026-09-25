@@ -1171,6 +1171,77 @@ def test_the_app_wiring_rules_are_documented() -> None:
     print("  the CALL, VARIANT, local-connection, env and analyst-tab rules are stated")
 
 
+def test_the_model_specific_boundary_is_documented_and_accurate() -> None:
+    """Which layers generalise is a fact about the code, so assert it against the code.
+
+    The knowledge base, physical layer and semantic view are derived from whatever
+    model is parsed. The reporting views, row access policy and demo data are written
+    for a sales-and-bookings shape. Stating that honestly is the difference between
+    "point it at any model" and "point it at any model, then write one SQL file".
+
+    Also guards the reverse drift: if someone generalises the reporting views, this
+    test fails and the claim has to be updated rather than silently going stale.
+    """
+    skill = open(os.path.join(ROOT, "SKILL.md"), encoding="utf-8").read()
+    assert "What generalises, and what does not" in skill, \
+        "SKILL.md does not say which layers are model-specific"
+
+    shape = re.compile(r"TERRITORY_LEVEL|GPC\d|SALES_AMOUNT|BOOKED|FISCAL_")
+    counts = {}
+    for name in ("45_reporting_views", "30_row_access_policy",
+                 "12_dimension_data", "13_fact_data"):
+        path = os.path.join(ROOT, "pipeline", "sql", name + ".sql")
+        counts[name] = len(shape.findall(open(path, encoding="utf-8").read()))
+        assert counts[name] > 0, (
+            "%s no longer carries model-shape references -- if it was generalised, "
+            "update the boundary table in SKILL.md" % name)
+        assert name in skill, "%s is model-specific but not listed in SKILL.md" % name
+
+    # The generated layers must stay generated, or the documented split is a lie.
+    # path1 (catalog) is the one that genuinely derives everything from the KB.
+    p1 = open(os.path.join(ROOT, "pipeline", "path1_catalog_glossary.py"),
+              encoding="utf-8").read()
+    assert "CORE_ENTITIES" not in p1, \
+        "the catalog generator now depends on the hardcoded entity list"
+
+    # The semantic view and physical layer are NOT model-independent, and SKILL.md
+    # must keep saying so. CORE_ENTITIES is the single pivot, and the physical layer
+    # imports it -- an easy thing to forget when describing the boundary.
+    p3 = open(os.path.join(ROOT, "pipeline", "path3_ossie_semantic_view.py"),
+              encoding="utf-8").read()
+    assert "CORE_ENTITIES" in p3, "CORE_ENTITIES is gone; update the boundary table"
+    phys = open(os.path.join(ROOT, "pipeline", "generate_physical_layer.py"),
+                encoding="utf-8").read()
+    if "CORE_ENTITIES" in phys:
+        assert "imports `CORE_ENTITIES`" in skill or "imports that same list" in skill, (
+            "generate_physical_layer.py imports CORE_ENTITIES, so the physical layer "
+            "is scoped to the reference star schema -- SKILL.md must not present it "
+            "as model-independent")
+    assert "CORE_ENTITIES" in skill, \
+        "SKILL.md does not name CORE_ENTITIES, the single pivot for generalising"
+    assert "KB_TERM" in phys, "the physical layer no longer derives columns from KB_TERM"
+
+    # And the checker must not hardcode this model's columns in its logic. Its
+    # docstring names them to explain the observed defect, which is fine; the code
+    # must derive everything from the views file.
+    vc = open(os.path.join(ROOT, "pipeline", "verify_composition.py"),
+              encoding="utf-8").read()
+    body = vc.split('"""', 2)[2] if vc.count('"""') >= 2 else vc
+    code = "\n".join(l for l in body.splitlines() if not l.lstrip().startswith("#"))
+    assert not shape.search(code), (
+        "verify_composition.py hardcodes this model's column names, so it would not "
+        "generalise to another subject area")
+
+    # The empty-table failure must not assert a cause that only this model has.
+    b = open(os.path.join(ROOT, "pipeline", "build.py"), encoding="utf-8").read()
+    msg_start = b.index("reported success but left these empty")
+    msg = b[msg_start:msg_start + 1200]
+    assert not shape.search(msg), (
+        "the empty-table message names this model's columns; the generic mechanism "
+        "should defer to the phase's own note for model-specific hints")
+    print("  the model-specific boundary is documented and matches the code")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -1204,3 +1275,4 @@ if __name__ == "__main__":
     test_catalog_comments_and_tags_are_batched_per_table()
     test_composed_column_references_are_checkable_and_checked()
     test_the_app_wiring_rules_are_documented()
+    test_the_model_specific_boundary_is_documented_and_accurate()
