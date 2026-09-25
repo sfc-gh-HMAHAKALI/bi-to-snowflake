@@ -945,6 +945,73 @@ def test_naming_rejects_values_that_cannot_be_identifiers() -> None:
     print("  naming rejects unusable identifiers and folds case, with a one-line error")
 
 
+def test_v10_defects() -> None:
+    """The four v10 findings that were real, verified against the code.
+
+    Findings 4 and 5 are not here. 4 claimed no phase creates the row-access bypass
+    role; 30_row_access_policy.sql:36 creates it and grants it to SYSADMIN, which
+    ACCOUNTADMIN inherits -- the empty-territory symptom it was diagnosing is
+    finding 3. 5 blamed the verifier's name derivation for ASK__ANALYST; the cause
+    was an empty --prefix accepted silently, fixed by validation in config.py.
+    """
+    comp = open(os.path.join(ROOT, "references", "composition-rules.md"),
+                encoding="utf-8").read()
+    low = " ".join(comp.lower().split())
+    src = open(os.path.join(ROOT, "pipeline", "build.py"), encoding="utf-8").read()
+
+    # F1: set_page_config must precede the bim_ui import, not just the first widget.
+    # Scope every assertion to the rule's own bullet: "set_page_config" and
+    # "st.connection" both occur elsewhere in this file, so a doc-wide search passes
+    # even after the rule itself has been deleted.
+    assert "## Runtime traps" in comp, "the runtime-traps section is gone"
+    traps = comp[comp.index("## Runtime traps"):]
+    bullets = traps.split("\n- ")
+    page = [b for b in bullets if "set_page_config" in b]
+    assert page, "the set_page_config ordering trap is undocumented"
+    rule = " ".join(page[0].lower().split())
+    assert "must come before" in rule, \
+        "the rule does not state the ordering as a requirement"
+    assert "from bim_ui import" in rule, \
+        "the rule does not say set_page_config must precede the bim_ui import"
+    assert "_in_snowsight" in rule and "st.connection" in rule, (
+        "the rule does not explain WHY importing the library is a Streamlit call, "
+        "so a reader has no reason to believe it")
+    assert rule.index("set_page_config(page_title") < rule.index("from bim_ui import kpi"), \
+        "the worked example shows the imports before set_page_config"
+
+    # F2: no nested expanders.
+    exp = [b for b in bullets if "expander" in b]
+    assert exp, "the nested-expander trap is undocumented"
+    assert "never nest" in " ".join(exp[0].lower().split()), \
+        "the nested-expander rule is not stated as a prohibition"
+
+    # F3: a phase that succeeds having inserted nothing must fail.
+    assert "expect_rows" in src, "Phase has no expect_rows, so an empty insert stays green"
+    assert "TERRITORY_SITE_SALES_PERSON" in src, \
+        "the territory table is not declared as a table that must not be empty"
+    assert "empty_expected_tables" in src, "nothing checks the declared tables"
+    # The check must actually gate on the phase's own result, and must run before
+    # success is recorded. A text-position assertion alone is satisfied by a branch
+    # that has been disabled, so assert the live condition.
+    assert "if ok and p.expect_rows:" in src, \
+        "the empty-table check is not gated on the phase succeeding with expect_rows"
+    check_pos = src.index("empty_expected_tables(p, args.connection)")
+    append_pos = src.index('results.append({"phase"')
+    assert check_pos < append_pos, \
+        "the row check runs after the phase is recorded as successful"
+    assert src[check_pos:append_pos].count("ok = False") == 1, \
+        "an empty declared table does not flip the phase to failed"
+
+    # F6: a bad connection name is caught in preflight, not by the first phase.
+    assert "def connection_problem" in src, "nothing validates the connection name"
+    assert "connection_problem(connection)" in src, \
+        "connection_problem is defined but never called from preflight"
+    assert "snow\", \"connection\", \"list\"" in src or "'connection', 'list'" in src, \
+        "the check does not read the configured connections, so it cannot list them"
+    print("  the four real v10 defects are guarded (F1 page-config, F2 expanders, "
+          "F3 empty inserts, F6 connection)")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -973,3 +1040,4 @@ if __name__ == "__main__":
     test_the_confirmation_is_a_button_not_a_text_prompt()
     test_the_backend_is_handed_over_with_clickable_urls()
     test_naming_rejects_values_that_cannot_be_identifiers()
+    test_v10_defects()

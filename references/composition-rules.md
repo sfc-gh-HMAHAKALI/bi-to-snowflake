@@ -187,6 +187,28 @@ Each of these exists because its absence produced a visible bug in the reference
 
 ## Runtime traps a composed app hits every time
 
+- **`st.set_page_config()` must come before `from bim_ui import ...`, not just before the
+  first widget.** `bim_ui/compat.py` evaluates `IN_SNOWSIGHT = _in_snowsight()` at module
+  scope, and that calls `st.connection("snowflake")`. A Streamlit command therefore runs
+  during the import itself, so importing the library first makes `set_page_config` raise
+  `StreamlitSetPageConfigMustBeFirstCommandError` -- and the traceback points at the
+  `set_page_config` line, which is the one line that is in the right place. The only
+  correct order in a composed `app.py` is:
+
+  ```python
+  import streamlit as st
+  st.set_page_config(page_title="...", layout="wide")   # must precede the next line
+  from bim_ui import kpi, charts, filters
+  ```
+
+- **Never nest `st.expander` inside another `st.expander`.** Streamlit raises
+  `StreamlitAPIException`; there is no degraded rendering. This bit the agent panel,
+  where "Generated SQL" was put inside the "Ask the Agent" expander. Put the generated
+  SQL in `st.code` directly under the answer, or in a sibling expander after the parent
+  has closed -- never inside it.
+
+
+
 These are not judgement calls. Both cost a working app in the reference build, and both
 pass every local test.
 

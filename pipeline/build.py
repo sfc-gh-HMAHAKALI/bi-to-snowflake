@@ -72,6 +72,14 @@ class Phase:
     # base. Anything relied on here is asserted by check_order() at plan time,
     # so a future reordering fails before the first object is created.
     depends_on: tuple[str, ...] = ()
+    # Fully-qualified tables that must hold at least one row once this phase has
+    # run. A phase whose INSERT selects from a CTE that matched nothing still
+    # returns success: the statement was valid and it inserted zero rows. That is
+    # how the territory table came out empty while the phase reported ok, and the
+    # symptom surfaced much later as a missing dashboard tab with no failing
+    # phase to point at. Declared per phase so the check names the real table
+    # rather than guessing from the file.
+    expect_rows: tuple[str, ...] = ()
 
 
 FOUNDATION: list[Phase] = [
@@ -107,6 +115,7 @@ PHYSICAL: list[Phase] = [
           note="Schema emitted from the knowledge base. NOTE: replaces the tables, "
                "which discards their comments and tags -- path 1 must re-run after this"),
     Phase("dim-data", "Dimension data", "sql", "sql/12_dimension_data.sql",
+          expect_rows=("SALES_ANALYTICS.TERRITORY_SITE_SALES_PERSON",),
           note="Territories are drawn from KB_SECURITY_MAPPING, so an empty KB yields zero rows"),
     Phase("fact-data", "Fact data", "sql", "sql/13_fact_data.sql"),
     Phase("backlog", "Open backlog rows", "sql", "sql/14_open_backlog.sql"),
@@ -513,6 +522,40 @@ def run_extract(model: str, inventory: str, skill_dir: str) -> tuple[bool, str]:
     return proc2.returncode == 0, out + (proc2.stderr or "")
 
 
+def empty_expected_tables(p: Phase, connection: str) -> list[str]:
+    """Which of a phase's ``expect_rows`` tables came out empty.
+
+    A valid INSERT whose SELECT matched nothing is a successful statement, so the
+    phase reports ok having produced no data. The territory table was built exactly
+    that way -- its rows come from KB_SECURITY_MAPPING through a pattern match -- and
+    when that match found nothing, every phase stayed green and the failure surfaced
+    much later as a missing dashboard tab with nothing to trace it to. One count per
+    declared table is far cheaper than debugging the symptom.
+
+    An unreadable count is reported rather than treated as zero: a permissions or
+    connection problem must not be mistaken for an empty table.
+    """
+    empty: list[str] = []
+    for fqn in p.expect_rows:
+        proc = subprocess.run(
+            ["snow", "sql", "-c", connection, "--format", "json",
+             "-q", "SELECT COUNT(*) AS N FROM %s.%s" % (NAMING.database, fqn)],
+            capture_output=True, text=True,
+        )
+        qualified = "%s.%s" % (NAMING.database, fqn)
+        if proc.returncode != 0:
+            empty.append("%s (could not be read)" % qualified)
+            continue
+        try:
+            n = int(json.loads(proc.stdout[proc.stdout.find("["):])[0]["N"])
+        except Exception:
+            empty.append("%s (row count unreadable)" % qualified)
+            continue
+        if n == 0:
+            empty.append(qualified)
+    return empty
+
+
 def kb_row_count(connection: str) -> int:
     """How many terms the knowledge base currently holds. -1 if unreadable."""
     proc = subprocess.run(
@@ -699,6 +742,40 @@ def missing_cli_for_deploy(plan: list[Phase]) -> list[str]:
     ]
 
 
+def connection_problem(connection: str) -> str:
+    """One line naming the real problem if ``connection`` is not usable, else "".
+
+    The default used to be a connection name that existed only on the machine this
+    was written on, so a first run elsewhere failed on a name the user had never
+    chosen. The failure then arrived from whichever phase happened to run first --
+    in one run as "the knowledge base is empty", which is a true statement about a
+    database the build had never managed to reach.
+
+    Lists what is actually configured, because the fix is almost always to pick one
+    of those rather than to create anything.
+    """
+    proc = subprocess.run(["snow", "connection", "list", "--format", "json"],
+                          capture_output=True, text=True)
+    if proc.returncode != 0:
+        # No CLI, or it cannot read its own config. Let the phases report that;
+        # guessing here would replace a real error with a speculative one.
+        return ""
+    try:
+        entries = json.loads(proc.stdout[proc.stdout.find("["):])
+        names = [e.get("connection_name") or e.get("name") for e in entries]
+        names = [n for n in names if n]
+    except Exception:
+        return ""
+    if not names:
+        return ("No Snowflake connections are configured. Add one with "
+                "`snow connection add`, then pass its name with --connection.")
+    if connection in names:
+        return ""
+    return ("--connection %r is not configured, so no phase can reach Snowflake. "
+            "Configured connections: %s. Pass one of those, or add a new one with "
+            "`snow connection add`." % (connection, ", ".join(sorted(names))))
+
+
 def preflight(paths: set[int], with_extract: bool, with_physical: bool,
               connection: str) -> list[str]:
     """Refuse to run a plan whose outputs would be built from an empty input.
@@ -710,6 +787,14 @@ def preflight(paths: set[int], with_extract: bool, with_physical: bool,
     message.
     """
     problems: list[str] = []
+    # Check the connection before anything that uses it. Every other preflight
+    # check runs SQL, so a bad connection name makes them all fail with the same
+    # unhelpful error -- and the build's first real symptom was "the knowledge
+    # base is empty", which sent the diagnosis to the knowledge base rather than
+    # to the connection. A wrong name here also costs a full phase to discover.
+    bad = connection_problem(connection)
+    if bad:
+        return [bad]
     effective = expand(paths)
     needs_kb = bool(effective & {1, 3, 4})
     if needs_kb and not with_extract:
@@ -926,6 +1011,20 @@ def _run(args, plan: list[Phase], paths: set[int], log_path: str) -> int:
                         "--stage", "build",
                     ]
         dt = time.time() - t0
+        # A phase can succeed and still have produced nothing. Check before
+        # recording success, so the failure stops the build here rather than
+        # surfacing as a missing dashboard tab several phases later.
+        if ok and p.expect_rows:
+            empty = empty_expected_tables(p, args.connection)
+            if empty:
+                ok = False
+                out = ("%s reported success but left these empty: %s\n\n"
+                       "The statements were valid; they matched no rows. For the "
+                       "territory table this means KB_SECURITY_MAPPING held no "
+                       "TERRITORY_LEVEL4 values in dotted form, which usually means "
+                       "the knowledge base load targeted a different database than "
+                       "--kb-database, or the source model declared no row filters."
+                       % (p.title, ", ".join(empty)))
         results.append({"phase": p.key, "title": p.title, "ok": ok, "seconds": round(dt, 1)})
         if p.stream:
             print(f"      -> {'ok' if ok else 'FAILED'}  {dt:6.1f}s")
