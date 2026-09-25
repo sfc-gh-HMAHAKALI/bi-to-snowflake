@@ -106,6 +106,29 @@ def pct(value: Any, *, decimals: int = 1) -> str:
     return f"{v:+.{decimals}f}%"
 
 
+def share(value: Any, *, decimals: int = 1) -> str:
+    """A proportion of a whole, unsigned.
+
+    Separate from ``pct`` because ``pct`` is deliberately signed: it exists for growth
+    deltas, where the sign is the point. Using it for a share produced
+    "+33.2% of sales arrives with no customer attribution", which reads as an increase
+    of 33.2% rather than a third of the total -- and it was written twice, once per
+    surface, because neither library offered the unsigned form.
+
+    Accepts either a fraction (0.332) or already-scaled percentage points (33.2), on the
+    same rule ``pct`` uses.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "--"
+    if pd.isna(v):
+        return "--"
+    if abs(v) <= 5:
+        v *= 100.0
+    return f"{v:.{decimals}f}%"
+
+
 def count(value: Any) -> str:
     try:
         v = float(value)

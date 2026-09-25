@@ -49,6 +49,24 @@ export function pct(v: unknown): string {
   return `${n >= 0 ? "+" : ""}${n.toFixed(1)}%`
 }
 
+/**
+ * A proportion of a whole, unsigned.
+ *
+ * Separate from `pct` because `pct` is deliberately signed -- it exists for growth
+ * deltas, where the sign is the point. Using it for a share rendered
+ * "+33.2% of sales arrives with no customer attribution", which reads as an increase
+ * rather than as a third of the total. That was written twice, once per surface,
+ * because neither library offered the unsigned form; now both do, under the same name.
+ *
+ * Accepts a fraction (0.332) or already-scaled percentage points (33.2), on the same
+ * rule `pct` uses.
+ */
+export function share(v: unknown): string {
+  let n = num(v)
+  if (Math.abs(n) <= 5) n *= 100
+  return `${n.toFixed(1)}%`
+}
+
 export function count(v: unknown): string {
   return Math.round(num(v)).toLocaleString()
 }

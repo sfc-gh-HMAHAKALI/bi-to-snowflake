@@ -232,6 +232,32 @@ Each of these exists because its absence produced a visible bug in the reference
   from bim_ui import kpi, charts, filters
   ```
 
+- **Streamlit reads paired `$` as LaTeX. Use `ui.agent_markdown()` for agent text.**
+  `st.markdown` treats a matched pair of `$` as maths delimiters, so an answer listing
+  two or more dollar amounts renders everything between the first and second `$` as
+  italic equations. A *single* figure renders correctly, which is why a one-question
+  smoke test passes and a ranking question does not -- and why this reached users across
+  several runs before being fixed in the library. `ui.agent_markdown()` escapes `$` and
+  leaves bold, code spans and bullets working. Never pass agent output to `st.markdown`
+  directly. React needs no equivalent: its `Markdown` component builds elements
+  directly and has no maths path.
+
+- **`pct()` is signed; use `share()` for a proportion.** Both libraries' `pct()` exists
+  for growth deltas, where the sign carries the meaning. Using it for a share printed
+  "+33.2% of sales arrives with no customer attribution", which reads as an increase
+  rather than as a third of the total. `metrics.share()` and `charts.share()` are the
+  unsigned form, in both libraries under the same name.
+
+- **`ui.provenance()` takes identifiers, not descriptions.** It now raises on a value
+  containing a space, because one run shipped "warehouse **build connection warehouse**"
+  to a reader whose only reason for reading that line was to learn which warehouse. Pass
+  the real warehouse, source table and fully qualified view.
+
+- **Editing a composed Streamlit module needs the process restarted.** `runOnSave`
+  reruns the script but does not reload already-imported local modules, so a fix to
+  `metrics.py` or `pages_impl.py` looks like it did nothing. Restart the server rather
+  than concluding the edit was wrong.
+
 - **Never nest `st.expander` inside another `st.expander`.** Streamlit raises
   `StreamlitAPIException`; there is no degraded rendering. This bit the agent panel,
   where "Generated SQL" was put inside the "Ask the Agent" expander. Put the generated

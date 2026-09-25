@@ -620,12 +620,19 @@ Then run the verifier:
 
 ```bash
 python3 pipeline/verify_deployment.py --connection <name> \
-  --database <DB> --kb-database <KB_DB> --prefix <PREFIX> --deploy <mode>
+  --database <DB> --kb-database <KB_DB> --prefix <PREFIX> \
+  --model-name <MODEL_NAME> --deploy <mode>
 ```
 
-**Pass the same namespace flags the build used.** Without them the verifier checks the
-*default* database, which either passes against somebody else's objects or fails against
-nothing — both confusing, neither about the build just run. `--deploy` matters too: on
+**Pass the same namespace flags the build used — including `--model-name`.** The
+semantic view is `<PREFIX>_<MODEL_NAME>`, so omitting `--model-name` makes the verifier
+look for the *default* `SALES_BOOKINGS` while the build created whatever the user asked
+for, and the semantic view check fails on an object that exists under another name. That
+became easy to hit the moment the wizard started asking for the model name: the build
+honours the answer and the documented verify command did not. Without the other flags
+the verifier checks the *default* database, which either passes against somebody else's
+objects or fails against nothing — both confusing, neither about the build just run.
+`--deploy` matters too: on
 `--deploy none` the Streamlit and App Runtime checks are reported as skipped instead of
 failing on objects that were never meant to exist.
 

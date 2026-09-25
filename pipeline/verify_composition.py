@@ -24,6 +24,7 @@ checks that survive the "hand the app over, do not audition it" rule.
 from __future__ import annotations
 
 import argparse
+import ast
 import os
 import re
 import sys
@@ -36,6 +37,19 @@ VIEWS_SQL = os.path.join(HERE, "sql", "45_reporting_views.sql")
 # produces an empty render rather than an error, which is why this list matters.
 KEY_PROPS = ("xKey", "yKey", "valueKey", "labelKey", "categoryKey", "seriesKey",
              "sortKey", "rowKey", "colKey", "dataKey", "nameKey")
+
+# The locked Streamlit libraries. A column reaches a chart as an argument to one of
+# these, so their call sites are where the names worth checking live.
+LIB_MODULES = {"charts", "kpi", "ui", "filters", "compat", "metrics"}
+
+# Upper-case constants that are configuration, not columns. Excluded by the name they
+# are bound to rather than by pattern-matching their value, which would be guesswork.
+INFRA_NAMES = {"DATABASE", "DB", "SCHEMA", "WAREHOUSE", "WH", "CONNECTION",
+               "CONNECTION_NAME", "ACCOUNT", "ROLE", "SEMANTIC_VIEW", "AGENT",
+               "ASK_PROC", "ASK_CONTEXT", "PREFIX", "KB_DATABASE", "KB_DB",
+               "KB_SCHEMA", "STAGE", "APP_SERVICE", "POOL", "MODEL_LABEL"}
+
+_COLUMN_SHAPED = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
 
 _VIEW = re.compile(r"CREATE OR REPLACE VIEW\s+(RPT_\w+)(.*?)(?=CREATE OR REPLACE VIEW|\Z)",
                    re.S | re.I)
@@ -107,32 +121,65 @@ def react_keys(app_dir: str) -> list[tuple[str, int, str]]:
 
 
 def streamlit_keys(app_dir: str) -> list[tuple[str, int, str]]:
-    """Column names a Streamlit page pulls out of a dataframe.
+    """Column names a composed Streamlit page passes to the locked libraries.
 
-    Restricted to explicit subscript and accessor forms. A bare upper-case string
-    literal is not evidence of a column -- 'SALES_ANALYTICS' and 'FY2026' are not --
-    and guessing would make this noisy enough to be ignored, which is worse than
-    not checking.
+    Parsed with ast rather than matched with regexes, because the first version of this
+    used regexes for ``df["COL"]`` and a few keyword forms and found **zero** references
+    in a real composed app -- reporting "0 unknown" and passing, while the React half of
+    the same check was finding thirty. A check that silently checks nothing is worse
+    than no check, since it also removes the suspicion that would have caught it.
+
+    What the composed pages actually do is pass columns positionally to the locked
+    library: ``charts.ranked_bar(territory, "TERRITORY_LEVEL1", SALES, emits=...)``,
+    and hold the measures in module constants. So collect string literals that are:
+
+      * any argument to a call on one of the locked library modules,
+      * assigned to a module-level constant (``SALES = "SALES_AMOUNT_TOTAL"``),
+      * a dict key (the label maps are keyed by column), or
+      * a subscript (``df["COL"]``).
+
+    Infrastructure constants are excluded by the name they are bound to, not by
+    guessing from their value: DATABASE, SCHEMA and WAREHOUSE are upper-case and
+    column-shaped, and on the reference app those three were the only false positives.
     """
     found: list[tuple[str, int, str]] = []
-    pat = re.compile(r"""(?:
-          \bdf\s*\[\s*["']([A-Z][A-Z0-9_]*)["']\s*\]
-        | \bdf\.(?:get|sort_values|groupby)\s*\(\s*["']([A-Z][A-Z0-9_]*)["']
-        | \b(?:x|y|values|names|color)\s*=\s*["']([A-Z][A-Z0-9_]*)["']
-    )""", re.X)
-    for root, _dirs, files in os.walk(app_dir):
-        if "__pycache__" in root or os.path.basename(root) == "bim_ui":
-            continue
+    for root, dirs, files in os.walk(app_dir):
+        dirs[:] = [d for d in dirs if d not in ("bim_ui", "__pycache__", "node_modules")]
         for fn in files:
             if not fn.endswith(".py"):
                 continue
             path = os.path.join(root, fn)
             rel = os.path.relpath(path, app_dir)
-            for i, line in enumerate(open(path, encoding="utf-8").read().splitlines(), 1):
-                for groups in pat.findall(line):
-                    name = next((g for g in groups if g), None)
-                    if name:
-                        found.append((rel, i, name))
+            try:
+                tree = ast.parse(open(path, encoding="utf-8").read())
+            except SyntaxError:
+                # Reported by the compile check, not here.
+                continue
+
+            def take(node, line: int) -> None:
+                if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                        and _COLUMN_SHAPED.match(node.value)):
+                    found.append((rel, line, node.value))
+
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id in LIB_MODULES):
+                    for arg in node.args:
+                        take(arg, node.lineno)
+                    for kw in node.keywords:
+                        take(kw.value, node.lineno)
+                elif isinstance(node, ast.Assign):
+                    names = {t.id for t in node.targets if isinstance(t, ast.Name)}
+                    if names & INFRA_NAMES:
+                        continue
+                    take(node.value, node.lineno)
+                elif isinstance(node, ast.Dict):
+                    for key in node.keys:
+                        if key is not None:
+                            take(key, node.lineno)
+                elif isinstance(node, ast.Subscript):
+                    take(node.slice, node.lineno)
     return found
 
 

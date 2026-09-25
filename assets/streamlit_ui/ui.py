@@ -148,6 +148,26 @@ def guard(df: pd.DataFrame | None, *, on_clear: Callable[[], None] | None = None
     return True
 
 
+def agent_markdown(text: str) -> None:
+    """Render text from the agent, without Streamlit reading currency as maths.
+
+    ``st.markdown`` treats a matched pair of ``$`` as LaTeX delimiters, so an answer
+    listing two or more dollar amounts turns everything between the first and second
+    ``$`` into italic equations. A ranking like "$18,959,400 ... $14,010,280" renders as
+    maths; a *single* figure renders correctly, which is exactly why a one-question
+    smoke test misses it, and why this reached a user in more than one run.
+
+    Escaped here, in the locked library, rather than in each composed page: it was
+    diagnosed during composition twice and lost both times, because the fix lived in a
+    file that is regenerated per model. The React surface needs no equivalent -- its
+    Markdown component builds elements directly and has no maths path.
+
+    Only ``$`` is escaped, so bold, italics, code spans and bullets still render, which
+    is what the agent's response instructions assume.
+    """
+    st.markdown(text.replace("$", "\\$"))
+
+
 def provenance(*, rows: int, elapsed_ms: int, source: str, warehouse: str,
                semantic_view: str, note: str | None = None,
                shown_rows: int | None = None) -> None:
@@ -164,6 +184,20 @@ def provenance(*, rows: int, elapsed_ms: int, source: str, warehouse: str,
     fetched = (f"{rows:,} rows fetched in {elapsed_ms:,} ms"
                if shown_rows is None or shown_rows == rows
                else f"{shown_rows:,} of {rows:,} rows shown, fetched in {elapsed_ms:,} ms")
+    # A provenance line exists to be trusted, so an unsubstituted placeholder in it is
+    # worse than no line at all: one run shipped "warehouse build connection warehouse"
+    # to a reader whose whole reason for looking was to find out which warehouse. These
+    # values are all known at composition time, so a descriptive phrase in place of an
+    # identifier is a composition slip, and failing loudly is the cheapest way to find
+    # it -- it is visible on every page render.
+    for name, value in (("source", source), ("warehouse", warehouse),
+                        ("semantic_view", semantic_view)):
+        low = str(value).lower()
+        if " " in low.strip() or "{{" in low or low in ("", "none", "tbd"):
+            raise ValueError(
+                "ui.provenance(%s=%r) looks like a placeholder rather than an "
+                "identifier. Pass the real value -- the warehouse the build used, the "
+                "fully qualified view -- not a description of it." % (name, value))
     bits = [
         fetched,
         f"source {source}",

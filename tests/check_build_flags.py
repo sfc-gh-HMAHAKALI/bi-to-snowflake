@@ -1191,16 +1191,19 @@ def test_the_model_specific_boundary_is_documented_and_accurate() -> None:
         "SKILL.md does not name CORE_ENTITIES, the single pivot for generalising"
     assert "KB_TERM" in phys, "the physical layer no longer derives columns from KB_TERM"
 
-    # And the checker must not hardcode this model's columns in its logic. Its
-    # docstring names them to explain the observed defect, which is fine; the code
-    # must derive everything from the views file.
+    # And the checker must not hardcode this model's columns in its logic. Docstrings
+    # and comments name them to explain the observed defects, which is what makes the
+    # rules credible; the executable code must derive everything from the views file.
+    # Strip both before scanning -- an earlier version stripped only '#' comments and
+    # flagged a worked example inside a function docstring.
     vc = open(os.path.join(ROOT, "pipeline", "verify_composition.py"),
               encoding="utf-8").read()
-    body = vc.split('"""', 2)[2] if vc.count('"""') >= 2 else vc
-    code = "\n".join(l for l in body.splitlines() if not l.lstrip().startswith("#"))
+    code = re.sub(r'"""[\s\S]*?"""', "", vc)
+    code = re.sub(r"'''[\s\S]*?'''", "", code)
+    code = "\n".join(l for l in code.splitlines() if not l.lstrip().startswith("#"))
     assert not shape.search(code), (
-        "verify_composition.py hardcodes this model's column names, so it would not "
-        "generalise to another subject area")
+        "verify_composition.py hardcodes this model's column names in executable "
+        "code, so it would not generalise to another subject area")
 
     # The empty-table failure must not assert a cause that only this model has.
     b = open(os.path.join(ROOT, "pipeline", "build.py"), encoding="utf-8").read()
@@ -1310,6 +1313,99 @@ def test_the_two_surfaces_are_composed_in_parallel_after_deciding() -> None:
     print("  both surfaces are composed in parallel, after the shared decisions")
 
 
+def test_v12_defects() -> None:
+    """Six findings from v12, four of them fixed in the locked libraries.
+
+    The pattern worth noting: the currency-as-LaTeX bug and the signed-percentage bug
+    were both diagnosed *during composition* in earlier runs and both came back, because
+    the fix lived in a composed file that is regenerated per model. Putting them in
+    assets/ is what makes them stay fixed.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "assets", "streamlit_ui"))
+    try:
+        import metrics as M
+    finally:
+        sys.path.pop(0)
+
+    # (1) share() is unsigned; pct() stays signed for growth.
+    assert M.share(0.332) == "33.2%", "share() is not unsigned: %r" % M.share(0.332)
+    assert M.pct(0.054).startswith("+"), "pct() lost its sign; growth deltas need it"
+    assert M.share(None) == "--", "share() does not degrade on a null"
+    tsx = open(os.path.join(ROOT, "assets", "react_ui", "charts.tsx"),
+               encoding="utf-8").read()
+    assert "export function share(" in tsx, \
+        "React has no share(), so the two surfaces format shares differently"
+    assert "export function count(" in tsx and "export function pct(" in tsx, \
+        "an existing formatter was lost while adding share()"
+
+    # (2) Agent text goes through an escaping helper, in the library.
+    ui = open(os.path.join(ROOT, "assets", "streamlit_ui", "ui.py"),
+              encoding="utf-8").read()
+    assert "def agent_markdown(" in ui, \
+        "no library helper escapes currency before st.markdown, so every composed app " \
+        "has to remember the LaTeX trap"
+    body = ui[ui.index("def agent_markdown("):]
+    body = body[:body.index("\ndef ", 1)]
+    assert '"$"' in body and "\\\\$" in body, \
+        "agent_markdown does not escape the dollar sign"
+
+    # (3) provenance() refuses a placeholder.
+    assert "looks like a placeholder" in ui, \
+        "ui.provenance() still renders a descriptive phrase as an identifier"
+
+    # (4) The Streamlit column scan must not be inert. It found 0 references in a real
+    # composed app while React found 30, and reported success.
+    sys.path.insert(0, os.path.join(ROOT, "pipeline"))
+    try:
+        import verify_composition as V
+    finally:
+        sys.path.pop(0)
+    tmp = tempfile.mkdtemp()
+    app = os.path.join(tmp, "app_streamlit")
+    os.makedirs(app)
+    with open(os.path.join(app, "pages_impl.py"), "w", encoding="utf-8") as fh:
+        fh.write('SALES = "SALES_AMOUNT_TOTAL"\n'
+                 'DB = "SOME_DATABASE_NAME"\n'
+                 'LABELS = {"TERRITORY_LEVEL1": "Territory"}\n'
+                 'def r(df):\n'
+                 '    charts.ranked_bar(df, "TERRITORY_L1", SALES, emits="GPC1")\n')
+    refs = V.streamlit_keys(app)
+    names = {n for _f, _l, n in refs}
+    assert "TERRITORY_L1" in names, \
+        "positional column arguments to the locked libraries are not scanned -- this " \
+        "is how the Streamlit half reported 0 references and passed"
+    assert "SALES_AMOUNT_TOTAL" in names, "module-level measure constants are not scanned"
+    assert "TERRITORY_LEVEL1" in names, "dict keys (the label maps) are not scanned"
+    assert "GPC1" in names, "keyword arguments are not scanned"
+    assert "SOME_DATABASE_NAME" not in names, \
+        "infrastructure constants are scanned as columns, which makes the check noisy"
+
+    # (5) The documented verify command passes --model-name. Anchor on the invocation,
+    # not the first mention of the filename -- the file is discussed in prose earlier,
+    # and matching that found a "command" with no flags in it at all.
+    wiz = open(os.path.join(ROOT, "references", "wizard.md"), encoding="utf-8").read()
+    cmd_at = wiz.index("python3 pipeline/verify_deployment.py")
+    # Bound to the code fence. A fixed character window ran past it into the prose
+    # that also mentions --model-name, so deleting the flag from the command still
+    # passed -- the guard was reading the explanation, not the thing being explained.
+    cmd = wiz[cmd_at:wiz.index("```", cmd_at)]
+    assert "--model-name" in cmd, (
+        "the documented verifier command omits --model-name, so it looks for the "
+        "default semantic view name while the build honoured the user's answer")
+
+    # (6) All of it documented for composition.
+    comp = " ".join(open(os.path.join(ROOT, "references", "composition-rules.md"),
+                         encoding="utf-8").read().lower().split())
+    for phrase, why in (
+        ("ui.agent_markdown()", "the LaTeX trap and its helper"),
+        ("`pct()` is signed", "pct vs share"),
+        ("takes identifiers, not descriptions", "the provenance placeholder"),
+        ("needs the process restarted", "Streamlit's module caching"),
+    ):
+        assert phrase in comp, "composition-rules.md does not cover %s" % why
+    print("  the v12 defects are fixed in the locked libraries and documented")
+
+
 if __name__ == "__main__":
     test_skill_dir_defaults_to_this_repo()
     test_dry_run_phase_counts()
@@ -1345,3 +1441,4 @@ if __name__ == "__main__":
     test_the_model_specific_boundary_is_documented_and_accurate()
     test_the_wizard_reports_progress_often_without_polling_snowflake()
     test_the_two_surfaces_are_composed_in_parallel_after_deciding()
+    test_v12_defects()
