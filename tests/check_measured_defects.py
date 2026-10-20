@@ -122,7 +122,7 @@ def test_leak_guard_covers_everything_committable() -> None:
     # Prove it, rather than trusting the flags: plant a leak and read the exit code.
     # The banned token is assembled from parts so this file does not itself trip the
     # guard it is testing -- which it did, on the first attempt.
-    token = "RES" + "MED" + "_TEST_V4"
+    token = "FICTIONAL_PRIVATE_MARKER"
     probe = os.path.join(ROOT, "pipeline", "sql", "zz_leak_probe.sql")
     try:
         with open(probe, "w", encoding="utf-8") as fh:

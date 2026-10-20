@@ -54,6 +54,7 @@ def parse_lookml_project(project_dir: str) -> dict:
         "explores": [],
         "dashboards": [],
         "models": [],
+        "source_files": [],
         "errors": [],
     }
 
@@ -89,6 +90,7 @@ def parse_lookml_project(project_dir: str) -> dict:
                 continue
 
             files_parsed += 1
+            result['source_files'].append({'path': rel_path, 'definition': parsed})
 
             # Extract connection from model files
             for model in parsed.get("models", []):
@@ -166,6 +168,7 @@ def parse_view(view_dict: dict) -> dict:
 
     try:
         normalized = {
+            "source_definition": view_dict,
             "name": name,
             "label": view_dict.get("label"),
             "description": view_dict.get("description"),
@@ -212,6 +215,7 @@ def parse_view(view_dict: dict) -> dict:
 def _parse_dimension(dim: dict) -> dict:
     return {
         "name": dim.get("name", ""),
+        "source_definition": dim,
         "type": dim.get("type", "string"),
         "sql": dim.get("sql"),
         "label": dim.get("label"),
@@ -245,6 +249,7 @@ def _parse_dimension_group(dg: dict) -> dict:
 def _parse_measure(m: dict) -> dict:
     return {
         "name": m.get("name", ""),
+        "source_definition": m,
         "type": m.get("type", "count"),
         "sql": m.get("sql"),
         "sql_distinct_key": m.get("sql_distinct_key"),

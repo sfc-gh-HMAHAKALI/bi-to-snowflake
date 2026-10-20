@@ -36,8 +36,7 @@ from modules.cognos.parser import (
 
 class TestDatatype:
     def test_datetime_with_zero_precision_is_date(self):
-        # Every dateTime in the reference model is precision=0 size=12, i.e. a
-        # physical DATE that the Cognos JDBC driver widened.
+        # A zero-precision DATE representation must not become a timestamp.
         assert map_cognos_datatype("dateTime", scale="6", precision="0", size="12") == "DATE"
         assert map_cognos_datatype("dateTime", scale="0", precision="0", size="12") == "DATE"
 
@@ -63,9 +62,9 @@ class TestDatatype:
 
 class TestRefobj:
     def test_three_part_reference(self):
-        r = parse_refobj("[Import View].[FACT_SALES_SUMMARY].[PROCESSED_DATE]")
+        r = parse_refobj("[Import View].[OBSERVATIONS].[PROCESSED_DATE]")
         assert r["namespace"] == "Import View"
-        assert r["object"] == "FACT_SALES_SUMMARY"
+        assert r["object"] == "OBSERVATIONS"
         assert r["item"] == "PROCESSED_DATE"
 
     def test_four_part_dmr_reference_keeps_last_as_item(self):
@@ -96,12 +95,12 @@ class TestCloneNames:
         assert canonical_calculation_name(raw) == (base, fy)
 
     def test_object_names(self):
-        assert analysis.canonical_object_name("FACT_SALES_SUMMARY_FY22") == (
-            "FACT_SALES_SUMMARY",
+        assert analysis.canonical_object_name("OBSERVATIONS_FY22") == (
+            "OBSERVATIONS",
             "FY22",
         )
-        assert analysis.canonical_object_name("FACT_SALES_SUMMARY") == (
-            "FACT_SALES_SUMMARY",
+        assert analysis.canonical_object_name("OBSERVATIONS") == (
+            "OBSERVATIONS",
             None,
         )
 
@@ -254,37 +253,31 @@ class TestSecurityNormalisation:
     def test_spelling_variants_collapse(self):
         # The same logical column across Import/Model/DMR namespaces.
         assert (
-            rls.normalize_column("Territory Level 4")
-            == rls.normalize_column("TERRITORY_LEVEL4")
-            == rls.normalize_column("territory_level_4")
-            == "TERRITORY_LEVEL4"
+            rls.normalize_column("Collection Level 4")
+            == rls.normalize_column("COLLECTION_LEVEL4")
+            == rls.normalize_column("collection_level_4")
+            == "COLLECTION_LEVEL4"
         )
 
     def test_role_case_variants_collapse(self):
         assert rls.normalize_column("Role") == rls.normalize_column("ROLE") == "ROLE"
 
-    def test_level_number_generalizes_for_policy_count(self):
-        # Four territory levels are one policy taking the level as a parameter.
-        assert rls.generalize_column("TERRITORY_LEVEL4") == "TERRITORY_LEVEL#"
-        assert rls.generalize_column("Territory Level 2") == "TERRITORY_LEVEL#"
+    def test_level_number_generalizes_for_display_only(self):
+        # Similar labels do not imply equivalent security policies.
+        assert rls.generalize_column("COLLECTION_LEVEL4") == "COLLECTION_LEVEL#"
+        assert rls.generalize_column("Collection Level 2") == "COLLECTION_LEVEL#"
         assert rls.generalize_column("ROLE") == "ROLE"
 
-    def test_policy_has_no_fail_open_branch(self):
-        sql = rls.generate_row_access_policy(
-            {"hierarchical_columns": ["TERRITORY_LEVEL4"]},
-            "P",
-            "DB.S.MAP",
-            "TERRITORY_LEVEL4",
-        )
-        # An unmapped principal must see nothing, so there is no NOT EXISTS escape.
-        assert "NOT EXISTS" not in sql
-        assert "LIKE m.column_value || '%'" in sql  # prefix match on dotted path
+    def test_policy_does_not_infer_prefix_access(self):
+        with pytest.raises(ValueError, match='complete predicates'):
+            rls.generate_row_access_policy(
+                {'hierarchical_columns': ['COLLECTION_LEVEL4']},
+                'P', 'DB.S.MAP', 'COLLECTION_LEVEL4')
 
-    def test_non_hierarchical_column_uses_equality(self):
-        sql = rls.generate_row_access_policy(
-            {"hierarchical_columns": []}, "P", "DB.S.MAP", "REGION"
-        )
-        assert "REGION = m.column_value" in sql
+    def test_flat_policy_also_requires_explicit_translation(self):
+        with pytest.raises(ValueError, match='explicitly map principals'):
+            rls.generate_row_access_policy(
+                {'hierarchical_columns': []}, 'P', 'DB.S.MAP', 'REGION')
 
 
 # ---------------------------------------------------------------------------

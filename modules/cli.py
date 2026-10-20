@@ -49,8 +49,7 @@ _PARSER_DEPENDENCIES: dict[str, list[tuple[str, str]]] = {
 def _ensure_dependencies(source_type: str) -> None:
     """Check that required packages for *source_type* are importable.
 
-    Missing packages are installed automatically via pip.  Raises
-    ``ExtractionError`` only if installation itself fails.
+    Missing packages fail with installation guidance; parsing never installs code.
     """
     deps = _PARSER_DEPENDENCIES.get(source_type)
     if not deps:
@@ -59,23 +58,11 @@ def _ensure_dependencies(source_type: str) -> None:
     for import_name, pip_name in deps:
         try:
             importlib.import_module(import_name)
-        except ImportError:
-            log.warning(
-                "Required package '%s' not found for source type '%s' — installing automatically…",
-                pip_name, source_type,
-            )
-            try:
-                subprocess.check_call(
-                    [sys.executable, "-m", "pip", "install", pip_name, "-q"],
-                    stdout=subprocess.DEVNULL,
-                )
-                log.info("Successfully installed '%s'.", pip_name)
-            except subprocess.CalledProcessError as exc:
-                raise ExtractionError(
-                    f"Failed to install required package '{pip_name}' for "
-                    f"source type '{source_type}'. Install manually with: "
-                    f"pip install {pip_name}"
-                ) from exc
+        except ImportError as exc:
+            raise ExtractionError(
+                f"Missing dependency '{pip_name}' for '{source_type}'. "
+                f"Install requirements.txt before offline parsing."
+            ) from exc
 
 
 def cmd_crawl(args: argparse.Namespace) -> dict:
@@ -336,7 +323,7 @@ def _resolve_output_dir(args, *, command: str = "report") -> str:
         )
 
     today = datetime.date.today().isoformat()           # e.g. 2026-04-04
-    prefix = f"{customer} - {today} - run"              # e.g. "Sharp Healthcare - 2026-04-04 - run"
+    prefix = f"{customer} - {today} - run"              # e.g. "Fictional Library - 2026-04-04 - run"
     parent = _DEFAULT_OUTPUT_ROOT
 
     # Find highest existing run number for this customer + date
@@ -934,6 +921,8 @@ def cmd_seed_data(args: argparse.Namespace) -> dict:
         include_all=args.all,
         include_facts=getattr(args, 'include_facts', False),
         fact_row_multiplier=getattr(args, 'fact_multiplier', 5),
+        destination_database=args.database,
+        destination_schema=args.schema,
     )
 
     if not result_data["statements"]:
@@ -953,14 +942,14 @@ def cmd_seed_data(args: argparse.Namespace) -> dict:
         f.write("\n".join(result_data["statements"]))
     log.info("Wrote seed SQL to %s", sql_path)
 
-    # Execute if requested
+    # Execution is explicit; no default connection or best-effort partial success.
     executed = False
     exec_results = []
     if args.execute:
+        if not getattr(args, 'connection', None):
+            raise ExtractionError('Synthetic execution requires an explicit --connection')
         from modules.output.analysis import _get_snowflake_connection
-        conn = _get_snowflake_connection(
-            connection_name=getattr(args, 'connection', None)
-        )
+        conn = _get_snowflake_connection(connection_name=args.connection)
         try:
             cur = conn.cursor()
             for stmt in result_data["statements"]:
@@ -974,7 +963,7 @@ def cmd_seed_data(args: argparse.Namespace) -> dict:
                 except Exception as e:
                     exec_results.append({"sql": stmt[:80], "status": "error",
                                           "error": str(e)})
-                    log.error("Failed: %s — %s", stmt[:60], e)
+                    raise ExtractionError('Synthetic execution failed; reconcile created objects before retrying') from e
         finally:
             conn.close()
         executed = True
@@ -1202,8 +1191,8 @@ def main():
     p_report = subparsers.add_parser("report", help="Generate HTML report + Excel workbook.")
     p_report.add_argument("input", help="Inventory JSON file.")
     p_report.add_argument("--output", "-o", help="Output directory (default: auto-named under ~/Downloads/).")
-    p_report.add_argument("--customer", help="Customer name for report header (e.g. 'Sharp Healthcare').")
-    p_report.add_argument("--source-label", help="Source description (e.g. 'Sharp LookML All Projects - 31 Projects').")
+    p_report.add_argument("--customer", help="Customer name for report header (e.g. 'Fictional Library').")
+    p_report.add_argument("--source-label", help="Source description (e.g. 'Fictional Library LookML').")
     p_report.add_argument("--ai", action="store_true",
                           help="Enable AI-powered rationalization via Snowflake Cortex.")
     p_report.add_argument("--ai-model", default="llama3.1-70b",

@@ -1,5 +1,5 @@
 
-USE SCHEMA {{KB_DB}}.KNOWLEDGE_BASE;
+USE SCHEMA {{KB_DB}}.{{KB_SCHEMA}};
 
 -- Tags live in the KB schema, not on the data, so the taxonomy is versioned
 -- alongside the metadata that populates it.

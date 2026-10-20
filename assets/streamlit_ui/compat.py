@@ -27,21 +27,13 @@ import streamlit as st
 MISSING: list[str] = []
 
 
-# Are we running inside Snowflake (a Snowsight iframe) rather than a local browser tab?
-#
-# Probed with st.connection, which is the supported accessor and is cached by Streamlit,
-# so calling it here costs nothing beyond the connection the app already needs.
-# Deliberately not get_active_session(): that is documented as not thread-safe, and on a
-# container runtime every viewer shares one process.
-#
-# This gates URL syncing. See filters.sync_to_url for why writing query params inside the
-# Snowsight iframe made every button in the app appear dead.
+# Detect runtime explicitly; importing UI helpers must never open a connection.
+# This gates URL syncing in the embedded Snowflake browser surface.
 def _in_snowsight() -> bool:
-    try:
-        st.connection("snowflake")
-        return True
-    except Exception:
-        return False
+    # Importing a chart must never authenticate. URL syncing is opt-in locally;
+    # use a conservative default when the runtime is not explicitly configured.
+    import os
+    return os.environ.get("B2S_RUNTIME", "snowflake") != "local"
 
 
 IN_SNOWSIGHT = _in_snowsight()

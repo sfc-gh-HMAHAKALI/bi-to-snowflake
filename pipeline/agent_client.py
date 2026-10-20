@@ -47,7 +47,8 @@ def agent_endpoint(account: str, agent_fqn: str) -> str:
     hostname form, whereas connections.toml stores it with a hyphen.
     """
     host = account.lower().replace("_", "-")
-    db, schema, name = agent_fqn.split(".")
+    from urllib.parse import quote
+    db, schema, name = (quote(part, safe='') for part in config.qualified(agent_fqn))
     return (
         f"https://{host}.snowflakecomputing.com"
         f"/api/v2/databases/{db}/schemas/{schema}/agents/{name}:run"
@@ -82,7 +83,7 @@ def read_token(conn: dict) -> str:
 def run_agent(
     agent_fqn: str,
     question: str,
-    connection_name: str = "my-demo-account",
+    connection_name: str,
     timeout: int = 180,
 ) -> dict:
     """Send one question to an agent and collect the streamed response.
@@ -181,40 +182,18 @@ def main(argv=None) -> int:
     ap.add_argument("--agent",
                     help="Fully-qualified agent name; defaults to the one "
                          "the naming flags imply")
-    ap.add_argument("--connection", default="my-demo-account")
-    ap.add_argument("--suite", action="store_true", help="Run the standard test suite")
+    ap.add_argument("--connection", required=True)
+    ap.add_argument("--suite", help="JSON list of model-specific questions and expectations")
     args = ap.parse_args(argv)
 
-    # The suite deliberately includes questions the model should NOT be able to
-    # answer. An agent evaluation that only asks answerable questions tells you
-    # nothing about how it behaves at the edge of its scope.
-    suite = [
-        (
-            "in-scope structured",
-            "What is our fiscal year to date sales amount by product line?",
-            "should return four product lines with fiscal YTD figures",
-        ),
-        (
-            "definitional",
-            "What does backlog mean in this model and which metric should I use for it?",
-            "should use the glossary tool, not general knowledge",
-        ),
-        (
-            "fiscal trap",
-            "What were sales year to date? Say explicitly which period you used.",
-            "should use FISCAL year to date, July onwards, not calendar January",
-        ),
-        (
-            "out of scope",
-            "What is the average patient adherence rate for our CPAP devices by month?",
-            "should decline and name what is missing, not approximate it",
-        ),
-        (
-            "cross-fact",
-            "Which sales territories have the largest gap between bookings and sales?",
-            "should combine both fact tables",
-        ),
-    ]
+    naming = config.from_args(args)
+    args.agent = args.agent or config.fqn(naming.database, naming.analytics_schema, naming.agent)
+    suite = []
+    if args.suite:
+        with open(args.suite, encoding='utf-8') as handle:
+            suite = json.load(handle)
+        if not isinstance(suite, list) or not suite:
+            ap.error('--suite must contain a nonempty JSON list')
 
     if args.suite:
         results = []

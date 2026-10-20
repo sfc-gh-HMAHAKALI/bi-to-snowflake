@@ -9,7 +9,7 @@ Tableau or Power BI inventory loads through the same path as a Cognos one.
 Usage
 -----
     python3 kb_loader.py --inventory out/cognos_inventory.json \\
-        --source-system cognos --connection my-demo-account
+        --source-system cognos --connection <connection-name>
 
     # Multiple models into the same KB:
     python3 kb_loader.py --inventory out/model_a.json --source-system cognos
@@ -166,10 +166,7 @@ KB_SCHEMA = config.DEFAULT.kb_schema
 # Cognos connection alias -> physical Snowflake schema. The source model names a
 # JDBC connection, not a schema, so the mapping has to be supplied rather than
 # inferred. Passed in via --schema-map for other models.
-DEFAULT_SCHEMA_MAP = {
-    "RAPID_Snowflake_Heavy": "SALES_ANALYTICS",
-    "RAPID_Snowflake_Heavy1": "COMMON_ANALYTICS",
-}
+DEFAULT_SCHEMA_MAP = {}  # Source connection aliases require an explicit mapping.
 
 
 def _hash(*parts: Any) -> str:
@@ -429,8 +426,7 @@ def _batched(rows: list[str], size: int) -> Iterable[list[str]]:
 class KnowledgeBaseLoader:
     """Writes a unified inventory into the KB tables."""
 
-    # Rows per MERGE. Batching matters: 19,921 security rules as individual
-    # INSERTs is tens of minutes of round trips.
+    # Bound rows per MERGE to avoid one round trip per source record.
     BATCH = 500
     # Statements per runner call. This mattered a great deal when every call was a
     # fresh `snow sql` subprocess -- it cut invocations from ~90 to ~13. With the
@@ -447,6 +443,7 @@ class KnowledgeBaseLoader:
         schema_map: dict[str, str],
         kb_database: str,
         progress: "LoadProgress | None" = None,
+        kb_schema: str = KB_SCHEMA,
     ):
         self.runner = runner
         self.system = source_system
@@ -455,7 +452,8 @@ class KnowledgeBaseLoader:
         self.schema_map = schema_map
         # The knowledge base, not the analytics layer -- 01_kb_tables.sql creates
         # KNOWLEDGE_BASE in {{KB_DB}}, and the two are commonly different databases.
-        self.target_database = kb_database
+        self.target_database = config.identifier(kb_database)
+        self.target_schema = config.identifier(kb_schema)
         self.stats: dict[str, int] = {}
         # Optional so existing callers and the tests keep working unchanged; when
         # absent, _merge falls back to the old one-line-per-table log.
@@ -518,8 +516,7 @@ class KnowledgeBaseLoader:
                 # Deliberately NOT `rows` -- that is this function's parameter, and
                 # rebinding it here made `total = len(rows)` below report the size
                 # of the last batch instead of the whole input. The data loaded was
-                # always correct; the count in the JSON summary was not. A 19,051
-                # row table reported as 51.
+                # always correct; only the reported count was truncated.
                 batch_rows, select_exprs = hoisted
                 inner = ",\n        ".join(
                     "(" + ", ".join(r) + ")" for r in batch_rows)
@@ -528,7 +525,7 @@ class KnowledgeBaseLoader:
                     "(\n    SELECT %s\n    FROM VALUES\n        %s\n    AS v(%s)\n)"
                     % (", ".join(select_exprs), inner, aliases))
             statements.append(
-                f"MERGE INTO {self.target_database}.{KB_SCHEMA}.{table} t\n"
+                f"MERGE INTO {config.fqn(self.target_database, self.target_schema, table)} t\n"
                 f"USING {source} s ({col_list})\n"
                 f"ON {on_clause}\n"
                 f"WHEN MATCHED THEN UPDATE SET {set_clause}\n"
@@ -1219,6 +1216,7 @@ def main(argv: list[str] | None = None) -> int:
     progress = LoadProgress()
     progress.opening(model, args.source_system)
 
+    naming = config.from_args(args)
     runner = make_runner(args.connection, prefer_cli=args.use_cli)
     loader = KnowledgeBaseLoader(
         runner,
@@ -1226,8 +1224,9 @@ def main(argv: list[str] | None = None) -> int:
         model,
         load_id,
         schema_map,
-        args.kb_database,
+        config.quote(naming.kb_database),
         progress=progress,
+        kb_schema=config.quote(naming.kb_schema),
     )
 
     try:

@@ -279,6 +279,7 @@ def extract_bo_inventory(bo_json: dict) -> dict:
     lov_queries = _extract_lov_queries(bo_json, errors)
 
     inventory = {
+        "source_definition": bo_json,
         "name": name,
         "connection": connection,
         "tables": tables,
@@ -431,6 +432,8 @@ def _extract_objects_flat(
                 object_type = obj_type_raw.capitalize() or "Unknown"
 
             objects.append({
+                "table": raw.get("table", ""),
+                "source_definition": raw,
                 "name": raw.get("name") or raw.get("label", ""),
                 "folder_path": folder_path,
                 "object_type": object_type,

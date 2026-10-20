@@ -42,7 +42,7 @@ _VALUE_DOMAINS: dict[str, list[str]] = {
                    "Taylor", "Thomas", "Wilson", "Moore", "Lee"],
     "city": ["New York", "Los Angeles", "Chicago", "Houston", "Phoenix",
              "Philadelphia", "San Antonio", "San Diego", "Dallas", "Austin"],
-    # --- Healthcare (detected from fulfillment-style inventories) ---
+    # --- Optional synthetic categorical examples ---
     "discipline": ["Nursing", "Physical Therapy", "Respiratory Therapy",
                     "Occupational Therapy", "Speech Therapy", "Lab",
                     "Radiology", "Pharmacy", "Social Work"],
@@ -50,10 +50,8 @@ _VALUE_DOMAINS: dict[str, list[str]] = {
                    "Cardiology", "Orthopedics", "Neurology", "OB/GYN"],
     "shift": ["Day", "Night", "Swing", "Weekend Day", "Weekend Night"],
     "setting": ["Inpatient", "Outpatient", "ED", "OR", "ICU", "Ambulatory"],
-    "hotel": ["Hilton Garden Inn", "Marriott Courtyard", "Hampton Inn",
-              "Holiday Inn Express", "Residence Inn", "Comfort Suites"],
-    "supplier": ["AMN Healthcare", "Cross Country", "Aya Healthcare",
-                  "Medical Solutions", "Trustaff", "FlexCare"],
+    "hotel": ["Fictional Inn A", "Fictional Inn B", "Fictional Inn C"],
+    "supplier": ["Fictional Supplier A", "Fictional Supplier B", "Fictional Supplier C"],
     "hub": ["Central Hub", "North Hub", "South Hub", "East Hub", "West Hub"],
     "approval": ["Approved", "Pending", "Rejected", "Under Review"],
     "union": ["Union A", "Union B", "Union C", "Non-Union"],
@@ -80,10 +78,8 @@ _DOMAIN_KEYWORDS: dict[str, list[str]] = {
     "channel": ["channel", "source_channel"],
     "payment": ["payment", "pay_method", "payment_method", "paymethod"],
     "yes_no": ["flag", "is_", "has_"],
-    "first_name": ["first_name", "firstname", "fname", "given_name",
-                    "clinicianfirstname", "emp_first_name"],
-    "last_name": ["last_name", "lastname", "lname", "surname", "family_name",
-                   "clinicianlastname", "emp_last_name"],
+    "first_name": ["first_name", "firstname", "fname", "given_name"],
+    "last_name": ["last_name", "lastname", "lname", "surname", "family_name"],
     "city": ["city", "town", "municipality"],
     "discipline": ["discipline"],
     "specialty": ["specialty", "speciality"],
@@ -245,6 +241,8 @@ def generate_seed_sql(
     include_all: bool = False,
     include_facts: bool = False,
     fact_row_multiplier: int = 5,
+    destination_database: str = '',
+    destination_schema: str = '',
 ) -> dict:
     """Generate CTAS statements for seed data.
 
@@ -263,9 +261,23 @@ def generate_seed_sql(
     Returns:
         Dict with ``statements``, ``assessment``, ``tables_seeded``.
     """
+    from pipeline.config import identifier, quote, qualified
+    if not destination_database or not destination_schema:
+        raise ValueError('Synthetic SQL requires explicit destination_database and destination_schema')
+    db_name, schema_name = identifier(destination_database), identifier(destination_schema)
+    for table in inventory.get('tables', []):
+        physical = table.get('physical_table') or table.get('physical_name') or ''
+        try:
+            source = qualified(physical)
+        except ValueError:
+            source = (identifier(table['database']), identifier(table['schema']), physical) if table.get('database') and table.get('schema') else None
+        if source and source[:2] == (db_name, schema_name):
+            raise ValueError('Synthetic destination must differ from every source schema')
+    for value in (rows_per_table, fact_row_multiplier):
+        if type(value) is not int or value < 1 or value > 100000:
+            raise ValueError('Synthetic row counts must be integers between 1 and 100000')
     assessment = assess_inventory(inventory)
-    db = assessment["database"]
-    schema = assessment["schema"]
+    db, schema = quote(db_name), quote(schema_name)
     table_columns = assessment["table_columns"]
     pk_map = assessment["pk_map"]
     fk_map = assessment["fk_map"]
@@ -376,8 +388,8 @@ def generate_seed_sql(
         "auto-detected (fact tables + dimensions)"
     )))
     header = (
-        f"-- Seed data generated from {assessment['source_type']} inventory\n"
-        f"-- Scope: {scope_desc}\n"
+        "-- Synthetic data only; heuristic values do not establish model semantics.\n"
+        f"-- Scope: {scope_desc.replace(chr(10), ' ').replace(chr(13), ' ')}\n"
         f"-- Tables: {len(scoped_tables)}, "
         f"Columns: {sum(len(c) for c in scoped_tables.values())}, "
         f"Rows per dim table: {rows_per_table}, "
@@ -421,10 +433,15 @@ def generate_seed_sql(
             col_names_ordered.append(safe_name)
             seed_val += 1
 
-        safe_tbl = _sanitize_table_name(tbl)
+        safe_tbl = 'SYNTHETIC_' + _sanitize_table_name(tbl)
+        quote(safe_tbl)
+        if safe_tbl in {item['name'] for item in tables_seeded}:
+            raise ValueError('Synthetic table name collision')
+        if len(set(col_names_ordered)) != len(col_names_ordered):
+            raise ValueError('Synthetic column name collision')
         select_block = ",\n".join(col_exprs)
         ctas = (
-            f"CREATE OR REPLACE TABLE {db}.{schema}.{safe_tbl} AS\n"
+            f"CREATE TABLE {db}.{schema}.{quote(safe_tbl)} AS\n"
             f"SELECT\n{select_block}\n"
             f"FROM TABLE(GENERATOR(ROWCOUNT => {tbl_rows}));\n"
         )
@@ -474,6 +491,7 @@ def _column_to_generator_expr(
     """
     dt = data_type.upper()
     cn = col_name.upper()
+    col_name = _sanitize_col_name(col_name)
 
     # --- Primary key ---
     if is_pk:
@@ -619,8 +637,7 @@ def _infer_domain(col_name: str, description: str, synonyms: list[str]) -> list[
 _MEASURE_PATTERNS: dict[str, list[str]] = {
     "count": ["COUNT", "CNT", "APPLIED", "SUBMITTED", "CONFIRMED",
               "CANCELED", "CANCELLED", "SCHEDULED", "COMPLETED",
-              "REJECTED", "APPROVED", "ONASSIGNMENT", "GOODTOGO",
-              "ORDEREDDEMAND"],
+              "REJECTED", "APPROVED"],
     "quantity": ["QTY", "QUANTITY", "POSITIONS", "OPENPOSITIONS",
                  "ORDERED", "NEEDED", "DEMAND", "SUPPLY", "FILLED",
                  "VACANT"],
@@ -709,9 +726,8 @@ def _pull_fk_children(
 ) -> None:
     """Add dimension tables that FK-reference already-scoped tables.
 
-    This catches dimensions like DIM_SHIFT_SUMMARY that point INTO a fact
-    table (e.g. DIM SHIFT SUMMARY.CLINICIANEVENTID → FACT PLACEMENT.CLINICIANEVENTID).
-    Only pulls non-fact, non-system tables.  Mutates *scoped_tables* in place.
+    This adds reverse-reference tables for synthetic examples only.
+    Mutates *scoped_tables* in place; it does not establish production grain.
     """
     for fk_key, pk_refs in fk_map.items():
         fk_tbl, fk_col = fk_key.rsplit(".", 1)

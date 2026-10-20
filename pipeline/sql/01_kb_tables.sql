@@ -1,5 +1,5 @@
 -- =====================================================================
--- the reference model Semantic Knowledge Base
+-- Source-derived Semantic Knowledge Base
 -- =====================================================================
 -- A source-agnostic, relational record of what BI semantic models declare.
 --
@@ -34,10 +34,10 @@
 CREATE DATABASE IF NOT EXISTS {{KB_DB}}
   COMMENT = 'Source-agnostic semantic knowledge base extracted from BI models';
 
-CREATE SCHEMA IF NOT EXISTS {{KB_DB}}.KNOWLEDGE_BASE
+CREATE SCHEMA IF NOT EXISTS {{KB_DB}}.{{KB_SCHEMA}}
   COMMENT = 'Relational record of declared business semantics, any BI source';
 
-USE SCHEMA {{KB_DB}}.KNOWLEDGE_BASE;
+USE SCHEMA {{KB_DB}}.{{KB_SCHEMA}};
 
 -- ---------------------------------------------------------------------
 -- Provenance

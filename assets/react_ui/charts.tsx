@@ -135,32 +135,48 @@ export function Sparkline({ values, color = SF.blue }: {
   )
 }
 
+export function rankedData(rows: Row[], labelKey: string, valueKey: string, preAggregated = false) {
+  if (preAggregated) {
+    const seen = new Set<string>();
+    return rows.map(row => {
+      const name = String(row[labelKey] ?? '(Missing)');
+      if (seen.has(name)) throw new Error('Pre-aggregated chart requires one row per category');
+      seen.add(name);
+      const raw = row[valueKey];
+      if (raw != null && (typeof raw !== 'number' && typeof raw !== 'string' || typeof raw === 'string' && !raw.trim())) {
+        throw new Error('Invalid numeric metric');
+      }
+      const value = raw == null ? null : Number(raw);
+      if (value !== null && !Number.isFinite(value)) throw new Error('Invalid numeric metric');
+      return { name, value };
+    }).sort((a, b) => (b.value ?? -Infinity) - (a.value ?? -Infinity));
+  }
+  const grouped = new Map<string, number>();
+  for (const row of rows) {
+    const key = String(row[labelKey] ?? '');
+    if (key) grouped.set(key, (grouped.get(key) ?? 0) + num(row[valueKey]));
+  }
+  return collapseTail([...grouped].map(([name, value]) => ({ name, value })));
+}
+
 export function RankedBar({
-  rows, labelKey, valueKey, format = usd, selected, onSelect,
+  rows, labelKey, valueKey, format = usd, selected, onSelect, preAggregated = false,
 }: {
   rows: Row[]
   labelKey: string
   valueKey: string
   format?: (v: unknown) => string
   selected?: string | null
+  preAggregated?: boolean
   onSelect?: (label: string | null) => void
 }) {
-  // Aggregate in the browser: these datasets are small and the alternative is a query
-  // per interaction, which makes a click feel slow for no benefit.
-  const grouped = new Map<string, number>()
-  for (const r of rows) {
-    const k = String(r[labelKey] ?? "")
-    if (!k) continue
-    grouped.set(k, (grouped.get(k) ?? 0) + num(r[valueKey]))
-  }
-  const data = collapseTail([...grouped].map(([name, value]) => ({ name, value })))
-                 .reverse()   // ECharts draws a horizontal category axis bottom-up
-  const peak = Math.max(...data.map(d => d.value), 0)
+  const data = rankedData(rows, labelKey, valueKey, preAggregated).reverse()
+  const peak = Math.max(...data.map(d => d.value ?? 0), 0)
 
   const option = {
     ...BASE,
     // 18% headroom so an outside value label cannot be clipped by the plot edge.
-    xAxis: { type: "value", max: peak ? peak * 1.18 : undefined, show: false },
+    xAxis: { type: "value", max: preAggregated ? undefined : (peak ? peak * 1.18 : undefined), show: false },
     yAxis: {
       type: "category",
       data: data.map(d => d.name),
@@ -169,6 +185,7 @@ export function RankedBar({
     },
     tooltip: {
       trigger: "item",
+      renderMode: 'richText',
       formatter: (p: { name: string; value: number }) =>
         `${p.name}: ${format(p.value)}`,
     },
@@ -190,9 +207,7 @@ export function RankedBar({
     }],
   }
 
-  // Floor is 140, not 220: a one-bar chart in a 220px panel reads as a chart that failed
-  // to draw the rest of its data. The US alone accounts for most of the customer book, so
-  // "sales by country" is legitimately a very short chart.
+  // A short category set should not reserve the height of a large chart.
   const height = Math.max(140, data.length * 34 + 40)
 
   return (
@@ -775,10 +790,8 @@ export function MixBar({ rows, xKey, seriesKey, valueKey }: {
 /**
  * Ranked bars with a cumulative share curve.
  *
- * The 80% line is the point: concentration is a risk question, and "104 customers are 80%
- * of the book" lands in a way a ranked list does not. The curve is computed over every
- * row, not just the bars drawn, so the percentage is true rather than
- * true-of-the-top-twenty.
+ * Concentration is computed over every row, not just the bars drawn, so the
+ * percentage describes the input population rather than only the displayed subset.
  */
 export function Pareto({ rows, labelKey, valueKey, topN = 20 }: {
   rows: Row[]; labelKey: string; valueKey: string; topN?: number
@@ -801,13 +814,9 @@ export function Pareto({ rows, labelKey, valueKey, topN = 20 }: {
   /**
    * The right-hand axis is scaled to the curve actually drawn, not fixed at 100%.
    *
-   * This data is close to uniform -- 104 of 266 customers make up 80% -- so the top twenty
-   * only reach about 20% cumulative. Against a 0-100% axis that curve is a flat line along
-   * the floor with no readable shape, and the 80% reference line sits in empty space above
-   * it pretending to be informative. Scaling to the curve gives it shape, and the 80% line
-   * is drawn only when it is actually in range. The concentration figure is stated in the
-   * caption either way, which is where it belongs: it is a fact about all 266 customers,
-   * not about the twenty bars.
+   * Near-uniform distributions may have low cumulative share among the displayed bars.
+   * Scale to the visible curve, and show the 80% line only when it is in range.
+   * The concentration caption still uses the complete input population.
    */
   const maxCum = Math.max(...shown.map((_, i) => cum[i]), 0)
   // Round up to the next 5% above the curve plus a small margin, so the top tick sits just

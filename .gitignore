@@ -8,6 +8,8 @@ dist/
 build/
 .env
 .env.local
+.streamlit/secrets.toml
+b2s-output/
 *.log
 .DS_Store
 .pytest_cache/

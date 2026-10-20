@@ -274,6 +274,9 @@ def parse_workbook(path: str) -> dict:
         "worksheets": [],
         "dashboards": [],
         "parameters": [],
+        "source_filters": [ET.tostring(item, encoding="unicode") for item in root.iter("filter")],
+        "custom_relations": [ET.tostring(item, encoding="unicode") for item in root.iter("relation")
+                             if item.get("type") not in ("table", "join")],
         "errors": [],
     }
 
@@ -465,6 +468,7 @@ def extract_datasource(ds_element: ET.Element) -> dict:
     for filt_el in ds_element.iter("filter"):
         try:
             ds["filters"].append({
+                "source_xml": ET.tostring(filt_el, encoding="unicode"),
                 "class": filt_el.get("class", ""),
                 "column": filt_el.get("column", ""),
                 "type": filt_el.get("type", ""),
@@ -516,6 +520,7 @@ def _extract_column(col_el: ET.Element) -> dict:
     return {
         "name": col_el.get("name", ""),
         "caption": col_el.get("caption", ""),
+        "aggregate": col_el.get("aggregation", ""),
         "role": col_el.get("role", ""),        # dimension / measure
         "type": col_el.get("type", ""),        # ordinal / quantitative / nominal
         "datatype": col_el.get("datatype", ""),

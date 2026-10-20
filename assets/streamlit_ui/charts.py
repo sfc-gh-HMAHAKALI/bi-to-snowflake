@@ -24,6 +24,7 @@ has already fetched. No visual in this module issues a query.
 from __future__ import annotations
 
 from typing import Any
+import math
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -58,17 +59,7 @@ SF_SCALE = [[0.0, "#F4FAFD"], [0.20, "#CDEAF6"], [0.45, "#8ED9EC"],
             [0.70, bim_ui.SF_BLUE], [1.0, bim_ui.SF_STAR]]
 
 # Chip labels, shared so a dimension is named the same wherever it appears.
-CHIP_LABELS = {
-    "FISCAL_YEAR_NAME": "Fiscal year",
-    "FISCAL_QUARTER_YEAR": "Fiscal quarter",
-    "TERRITORY_LEVEL1": "Region",
-    "TERRITORY_LEVEL2": "Territory L2",
-    "TERRITORY_LEVEL3": "Territory L3",
-    "TERRITORY_LEVEL4": "Territory L4",
-    "GPC1": "Product group",
-    "GFP_GROUP": "Product family",
-    "CUSTOMER_COUNTRY": "Country",
-}
+CHIP_LABELS: dict[str, str] = {}  # Composition may supply declared business labels.
 
 
 def _base_layout(**overrides: Any) -> dict:
@@ -134,13 +125,33 @@ def collapse_tail(df: pd.DataFrame, label_col: str, value_col: str,
     return pd.concat([head, pd.DataFrame([other])], ignore_index=True)
 
 
+def ranked_frame(df: pd.DataFrame, label_col: str, value_col: str, *,
+                 pre_aggregated: bool = False) -> pd.DataFrame:
+    if not pre_aggregated:
+        return collapse_tail(df.groupby(label_col, as_index=False)[value_col].sum(),
+                             label_col, value_col)
+    frame = df[[label_col, value_col]].copy()
+    if frame[label_col].duplicated().any():
+        raise ValueError('Pre-aggregated chart requires one row per category')
+    if any(isinstance(value, bool) or (isinstance(value, str) and not value.strip())
+           for value in frame[value_col]):
+        raise ValueError('Invalid numeric metric')
+    frame[value_col] = pd.to_numeric(frame[value_col], errors='raise')
+    if any(not math.isfinite(float(value)) for value in frame[value_col].dropna()):
+        raise ValueError('Invalid numeric metric')
+    labels = frame[label_col].map(lambda value: '(Missing)' if pd.isna(value) else str(value))
+    if labels.duplicated().any():
+        raise ValueError('Pre-aggregated category labels collide when displayed')
+    frame[label_col] = labels
+    return frame.sort_values(value_col, ascending=False, na_position='last')
+
+
 def ranked_bar(df: pd.DataFrame, label_col: str, value_col: str, *,
                title: str, key: str, emits: str | None = None,
-               subtitle: str | None = None) -> None:
-    """Horizontal ranked bars with click-to-filter."""
+               subtitle: str | None = None, pre_aggregated: bool = False) -> None:
+    """Ranked bars; pre_aggregated preserves each value and never folds tails."""
     bim_ui.section(title, subtitle)
-    frame = collapse_tail(df.groupby(label_col, as_index=False)[value_col].sum(),
-                          label_col, value_col)
+    frame = ranked_frame(df, label_col, value_col, pre_aggregated=pre_aggregated)
     if bim_ui.guard(frame, on_clear=filters.clear, what=title.lower()):
         return
 
@@ -159,14 +170,14 @@ def ranked_bar(df: pd.DataFrame, label_col: str, value_col: str, *,
     fig = go.Figure(go.Bar(
         x=values, y=labels, orientation="h",
         marker_color=colours, cliponaxis=False,
-        text=[metrics.format_value(value_col, v) for v in values],
+        text=[('--' if pd.isna(v) else f'{float(v):,.4g}') if pre_aggregated else metrics.format_value(value_col, v) for v in values],
         textposition="outside",
         hovertemplate="%{y}: %{text}<extra></extra>",
     ))
     fig.update_layout(**_base_layout(
         height=max(240, 34 * len(labels) + 50),
         margin={"l": 8, "r": 8, "t": 10, "b": 8},
-        xaxis={"range": [0, peak * 1.18] if peak else None, "showticklabels": False},
+        xaxis={"range": None if pre_aggregated else ([0, peak * 1.18] if peak else None), "showticklabels": False},
     ))
 
     event = compat.plotly_chart(fig, key=key,
@@ -614,13 +625,8 @@ def pareto(df: pd.DataFrame, label_col: str, value_col: str, *,
 
     # The cumulative axis is scaled to the curve actually drawn, not fixed at 0-100%.
     #
-    # This data is close to uniform -- 104 of 266 customers make up 80% -- so the top
-    # twenty only reach about 20% cumulative. Against a 0-100% axis that curve is a flat
-    # line along the floor with no readable shape, and the 80% reference line sits in
-    # empty space above it pretending to be informative. Scaling gives the curve shape,
-    # and the 80% line is drawn only when it is actually in range. The concentration
-    # figure is stated in the caption either way, which is where it belongs: it is a fact
-    # about every customer, not about the twenty bars.
+    # Near-uniform distributions may have low cumulative share among displayed bars.
+    # Show the 80% line only when in range; the caption uses the complete input.
     max_cum = float(shown["_cum"].max() or 0.0)
     # Round up to the next 5% above the curve plus a small margin, so the top tick sits
     # just above the last point rather than a whole decade above it.

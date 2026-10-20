@@ -1,22 +1,8 @@
-"""Cognos security filters to Snowflake row access policy design.
+"""Inspect declared Cognos security rules without inferring executable grants.
 
-The reference model carries 19,921 ``securityFilterDefinition`` entries, which
-collapse to 19,051 once duplicate principal/filter pairs are removed. Each
-binds one Cognos account to a row filter, almost always of the form::
-
-    AREA.ROLE = 'AREA-ROLE' AND AREA.TERRITORY_LEVEL4 = 'EAST.GREATLAKES.AREA.CLEVELAND'
-
-That is not 19,921 distinct security rules. It is one rule -- *a principal sees
-rows matching their role and their territory* -- instantiated per principal. The
-useful output is therefore a **mapping table plus a single policy**, not a
-generated policy per filter.
-
-This module derives that mapping. It deliberately does not claim to reproduce
-the reference model's security model: hierarchical inheritance (an L2 manager seeing their L1
-reports' rows) is not expressible in these flat per-account filters, so if it
-exists in Cognos it lives somewhere else and has to be designed separately. The
-``hierarchy_warning`` field says so explicitly rather than leaving the reader to
-assume the mapping is complete.
+Column patterns and dotted values are descriptive hints only. They cannot prove
+principal inheritance, predicate grouping, or which Snowflake policies are needed.
+Retain original expressions for a separately reviewed security translation.
 """
 
 from __future__ import annotations
@@ -29,40 +15,24 @@ from ..common.logger import get_logger
 
 log = get_logger(__name__)
 
-# Territory codes are dotted paths: EAST.GREATLAKES.KAM.CLEVELAND
+# Dotted values are descriptive only; they do not imply inherited entitlement.
 _DOTTED_RE = re.compile(r"^[A-Z0-9_]+(?:\.[A-Z0-9_]+)+$", re.IGNORECASE)
 
 _NON_ALNUM_RE = re.compile(r"[^A-Z0-9]+")
 # Trailing level number, with or without a separator: LEVEL_4 / LEVEL4.
 _LEVEL_SEP_RE = re.compile(r"_(\d+)$")
-# Any territory level column, whatever its level number.
-_TERRITORY_LEVEL_RE = re.compile(r"^(TERRITORY_LEVEL)(\d+)$")
+# Descriptive numbered columns, independent of business domain.
+_TERRITORY_LEVEL_RE = re.compile(r"^(.+_LEVEL)(\d+)$")
 
 
 def normalize_column(name: str) -> str:
-    """Canonical form of a column name for grouping.
-
-    The same logical column appears under several spellings across the Cognos
-    namespaces -- ``TERRITORY_LEVEL4``, ``Territory Level 4``, ``Territory
-    Level4`` -- because the Import View uses physical names while the Model and
-    DMR views use presentation names. Grouping on the raw string reports ten
-    distinct security shapes where there are two, which would wrongly suggest the
-    population cannot collapse to a single policy.
-
-    The trailing separator before a level number is also dropped, so
-    ``TERRITORY_LEVEL_4`` and ``TERRITORY_LEVEL4`` are one column.
-    """
+    """Canonical display name for descriptive grouping, never authorization."""
     canonical = _NON_ALNUM_RE.sub("_", (name or "").upper()).strip("_")
     return _LEVEL_SEP_RE.sub(r"\1", canonical)
 
 
 def generalize_column(name: str) -> str:
-    """Abstract a territory level number away: TERRITORY_LEVEL4 -> TERRITORY_LEVEL#.
-
-    Used to answer the question that actually matters for policy design: the
-    filters constrain *a* territory level, and which level differs per role. That
-    is one policy taking the level as a parameter, not four policies.
-    """
+    """Group numbered level labels for display, not policy equivalence."""
     return _TERRITORY_LEVEL_RE.sub(r"\1#", normalize_column(name))
 
 
@@ -76,7 +46,7 @@ def derive_security_rules(parsed: dict) -> list[dict[str, Any]]:
             {
                 "principal": sf.get("principal", ""),
                 "principal_type": sf.get("principal_type", ""),
-                # The Cognos group path is the role hierarchy, e.g. SALES:REGION:AREA-ROLE
+                # Preserve source group paths verbatim; do not infer inheritance.
                 "principal_groups": sf.get("principal_groups", []),
                 "role_group": (sf.get("principal_groups") or [""])[-1],
                 "entities": entities,
@@ -91,12 +61,7 @@ def derive_security_rules(parsed: dict) -> list[dict[str, Any]]:
 
 
 def summarize_security(parsed: dict) -> dict[str, Any]:
-    """Collapse the filter population into its distinct shapes.
-
-    A "shape" is the set of columns a filter constrains, ignoring the literal
-    values. If the whole population reduces to one or two shapes, a single row
-    access policy covers it.
-    """
+    """Summarize column shapes without inferring security equivalence."""
     rules = derive_security_rules(parsed)
 
     shapes: dict[tuple[str, ...], int] = defaultdict(int)
@@ -129,9 +94,7 @@ def summarize_security(parsed: dict) -> dict[str, Any]:
         key=lambda s: -s["filter_count"],
     )
 
-    # A column whose values are dotted paths is a hierarchy encoded as a string,
-    # which matters: prefix matching on it gives hierarchical access without a
-    # recursive mapping table.
+    # Retain this inspection hint for compatibility; never use it for prefix access.
     hierarchical_columns = [
         col
         for col, vals in values_by_column.items()
@@ -143,8 +106,7 @@ def summarize_security(parsed: dict) -> dict[str, Any]:
         "distinct_principals": len({r["principal"] for r in rules}),
         "distinct_shapes": len(shapes),
         "shapes": shape_list,
-        # Shapes with the territory level number abstracted away. This is the
-        # number that decides how many policies are actually needed.
+        # Descriptive label counts are not policy counts.
         "distinct_patterns": len(patterns),
         "patterns": pattern_list,
         "territory_levels_used": sorted(
@@ -157,16 +119,13 @@ def summarize_security(parsed: dict) -> dict[str, Any]:
             c: len(v) for c, v in sorted(values_by_column.items())
         },
         "hierarchical_columns": hierarchical_columns,
-        # One policy per generalized pattern, not per raw shape. The level column
-        # becomes a parameter of the mapping table rather than a separate policy.
-        "policies_required": len(patterns),
-        "collapses_to_single_policy": len(patterns) <= 2,
+        # Policy count cannot be established from column shapes.
+        "policies_required": None,
+        "collapses_to_single_policy": None,
         "hierarchy_warning": (
-            "These filters are flat per-principal equality predicates. If the reference model "
-            "requires hierarchical inheritance (an L2 manager seeing their L1 "
-            "reports' rows), it is not expressed in this model and must be "
-            "designed separately -- the mapping below reproduces direct "
-            "assignment only."
+            "Column/value summaries do not preserve complete Boolean semantics or "
+            "principal inheritance. Review the full source expressions and explicit "
+            "principal mappings before generating security controls."
         ),
     }
 
@@ -206,42 +165,11 @@ def generate_row_access_policy(
     mapping_table: str,
     territory_column: str,
     role_column: str = "ROLE",
-    security_role: str = "BI_SECURITY_ADMIN",
+    security_role: str | None = None,
 ) -> str:
-    """Emit a Snowflake row access policy replacing the whole filter population.
-
-    Uses prefix matching (``LIKE value || '%'``) on the dotted territory path
-    rather than strict equality, because the dotted codes are a hierarchy encoded
-    as a string: a principal mapped to ``EAST.GREATLAKES`` should see
-    ``EAST.GREATLAKES.KAM.CLEVELAND``. Strict equality would give a manager
-    access to nothing but their own exact node.
-
-    Note the deliberate absence of a fail-open branch. A principal with no
-    mapping row sees no rows. Adding ``OR NOT EXISTS (...)`` to let unmapped
-    users through is how row access policies silently stop protecting anything.
-    """
-    hierarchical = territory_column in (summary.get("hierarchical_columns") or [])
-    match = (
-        f"{territory_column} LIKE m.column_value || '%'"
-        if hierarchical
-        else f"{territory_column} = m.column_value"
+    """Retired unsafe generator; descriptive summaries cannot authorize access."""
+    raise ValueError(
+        'Automatic policy generation from column-shape summaries is unsafe. '
+        'Preserve complete predicates and explicitly map principals before policy design. '
+        'Dotted values do not establish hierarchical entitlement; no bypass role is inferred.'
     )
-    note = (
-        "-- Prefix match: territory codes are dotted hierarchy paths, so a\n"
-        "-- principal mapped to a parent node sees all descendants.\n"
-        if hierarchical
-        else "-- Exact match: territory values are not hierarchical paths.\n"
-    )
-
-    return f"""CREATE OR REPLACE ROW ACCESS POLICY {policy_name}
-  AS ({territory_column} VARCHAR) RETURNS BOOLEAN ->
-{note}  EXISTS (
-    SELECT 1
-    FROM {mapping_table} m
-    WHERE m.principal = CURRENT_USER()
-      AND m.column_name = '{territory_column}'
-      AND {match}
-  )
-  -- No fail-open branch: a principal with no mapping row sees no rows.
-  OR IS_ROLE_IN_SESSION('{security_role}');
-"""

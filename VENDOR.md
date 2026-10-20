@@ -5,7 +5,11 @@ self-contained Cortex Extension share works in any account with no sibling-skill
 git-branch prerequisites. The cost of vendoring is drift. This file is how drift stays
 visible.
 
-Vendored on **2026-09-23**.
+Vendored on **2026-09-23**. Counts and source descriptions below describe that historical import,
+not the current implementation. The portable refactor replaces the embedded model and phase graph
+with source-derived contracts, reviewed translations and offline artifacts. It preserves reusable
+parsers, the relational KB loader and visual libraries. The ranked-chart pre-aggregated mode is an
+additive, tested extension; legacy chart defaults remain unchanged.
 
 ## modules/ -- BI source parsing
 
@@ -27,8 +31,9 @@ vendoring, specifically so this record points at a released state rather than a 
 Before that merge, `main` was missing 3,161 lines across 11 files -- not only
 `modules/cognos/` but `modules/output/inventory.py` and the `modules/cli.py` wiring.
 
-**Re-sync:** `rsync -a --exclude='__pycache__' --exclude='*.pyc' <se>/modules/ modules/`
-then run `python3 -m pytest modules/cognos/test_cognos.py`.
+**Re-sync:** compare upstream changes selectively. Do not overwrite the tree with rsync: local
+restriction/provenance preservation and fail-closed normalization must survive. Run
+`bash tests/run_all.sh` and both generated-app builds after any update.
 
 ## assets/react_ui/ -- React component library
 
@@ -80,12 +85,10 @@ An earlier draft of the plan described that copy as a "diverged fork" of upstrea
 proposed reconciling the two. That was wrong: they are parallel implementations that share
 some names. There is nothing to reconcile.
 
-The deciding argument is the requirement. This skill exists to reproduce a specific
-dashboard, and that dashboard was built on this code. Mixing two design systems -- two
-palettes, two KPI renderers, two filter models -- produces an app that looks like neither.
-So the proven code is the basis, and upstream's extra modules (`chart_spec.py`,
-`charts_altair.py`, `grid.py`, `provenance.py`, `states.py`) are deliberately left behind
-rather than grafted on.
+The original vendoring preserved one visual design rather than mixing incompatible palettes,
+KPI renderers and filter models. The current skill synthesizes explorers from arbitrary supported
+source models; it no longer reproduces a single embedded dashboard. Reusable components remain
+canonical here, while source-dependent composition is generated separately.
 
 Worth revisiting if upstream's library ever gains something these ten shapes cannot express.
 
@@ -97,7 +100,8 @@ Worth revisiting if upstream's library ever gains something these ten shapes can
 | What | `build.py` (phase graph, `--dry-run`, timing instrumentation), `sql/` (20 DDL files), `kb_loader.py`, `kb_to_inventory.py`, `generate_physical_layer.py`, `path1_catalog_glossary.py`, `path3_ossie_semantic_view.py`, `agent_client.py`, `verify_deployment.py` |
 | Upstream | none -- untracked, never committed anywhere |
 
-3,741 lines of Python plus the DDL. This is the only copy; it had no version control before
-this repo. Carried engagement-specific literals at the time, which the naming work in
-`pipeline/config.py` since replaced
-parameterises.
+The original import included 3,741 lines of Python plus DDL. The portable refactor removed its
+embedded entity list, fiscal rules, synthetic loaders and bypass policy rather than renaming them.
+`pipeline/config.py` now resolves run settings for source-derived generators. Legacy template
+filenames retained as compatibility notices must not be mistaken for active model definitions.
+Working-tree sanitization does not remove material from existing Git history.

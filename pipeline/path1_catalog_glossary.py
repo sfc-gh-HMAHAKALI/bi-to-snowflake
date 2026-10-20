@@ -114,8 +114,8 @@ def _lit(s: str | None) -> str:
 def existing_tables(connection: str, database: str) -> set[tuple[str, str]]:
     """Physical tables that actually exist in the target database.
 
-    The KB describes 195 entities from the source model, but only the subset that
-    has been materialised can carry a comment or a tag. Attempting the rest fails
+    The KB can describe more entities than are available in the warehouse. Only
+    the subset that exists can carry comments or tags. Attempting the rest fails
     the batch on the first missing object, so the catalog operations are
     intersected with reality rather than assuming the KB and the warehouse are in
     step. The difference between the two counts is itself useful: it is the
@@ -230,9 +230,7 @@ def generate_comments(connection: str, database: str) -> str:
     #
     # Grouped one ALTER TABLE per table rather than one COMMENT ON COLUMN per column.
     # Snowflake accepts an arbitrary list of column clauses in a single ALTER, and
-    # each statement is a serial round trip costing roughly 0.67s, so this phase's
-    # cost is set by statement COUNT, not by how much text each carries. On the
-    # reference model that is the difference between ~280 statements and a few dozen.
+    # Grouping clauses reduces round trips without changing their meaning.
     seen: set[tuple] = set()
     per_table: dict[str, list[str]] = {}
     for c in col_rows:
@@ -494,7 +492,7 @@ def generate_ontology_handoff(connection: str) -> dict:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="Path 1: Horizon catalog, glossary, ontology")
-    ap.add_argument("--connection", default="my-demo-account")
+    ap.add_argument("--connection", required=True)
     config.add_arguments(ap)
     # Generated DDL goes to out/ (git-ignored), never to sql/ (tracked). These
     # files are an audit artefact -- the SQL that actually runs is passed to
@@ -510,14 +508,15 @@ def main(argv=None) -> int:
     # is built or any query runs. Without this the whole script silently
     # targeted the default KB database and ignored --kb-database.
     global KB
-    KB = config.from_args(args).kb
+    naming = config.from_args(args)
+    KB = naming.kb
 
     os.makedirs(args.out_dir, exist_ok=True)
     os.makedirs("out", exist_ok=True)
 
     print("building Path 1 artifacts from the knowledge base")
-    comments = generate_comments(args.connection, args.database)
-    tags = generate_tags(args.connection, args.database)
+    comments = generate_comments(args.connection, config.quote(naming.database))
+    tags = generate_tags(args.connection, config.quote(naming.database))
     ontology = generate_ontology_handoff(args.connection)
 
     files = {
@@ -532,7 +531,7 @@ def main(argv=None) -> int:
             f.write(sql)
         print(f"  wrote {p} ({sql.count(';')} statements)")
 
-    with open("out/ontology_handoff.json", "w", encoding="utf-8") as f:
+    with open(os.path.join(args.out_dir, "ontology_handoff.json"), "w", encoding="utf-8") as f:
         json.dump(ontology, f, indent=2, default=str)
     print(
         f"  wrote out/ontology_handoff.json "

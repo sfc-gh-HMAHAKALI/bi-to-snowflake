@@ -1,115 +1,87 @@
-"""No file this repository would commit may carry a customer identifier.
+"""Scan committable paths and content without embedding real customer names.
 
-This repository was scrubbed once, of one engagement's database names, business-unit
-abbreviation, email domain and Cognos group paths. A grep in the suite is what keeps
-them from drifting back in through a copied snippet.
-
-**Scans everything `git add -A` would stage**, not just what is already tracked. That
-distinction is the whole point. Two phases generate DDL from the knowledge base, and
-until recently they wrote it over the tracked templates in ``pipeline/sql/`` -- so after
-any real build the working tree held 552 lines of one customer's database, schema and
-table names, one ``git add -A`` away from being published. The generators now write to
-``pipeline/out/`` instead, but a guard that only reads ``git ls-files`` would not have
-caught the old behaviour and would not catch a stray ``--out-dir sql`` reintroducing it.
-Anything ignored by ``.gitignore`` is out of scope by definition: it cannot be committed.
-
-Excluded on purpose, and only these two:
-
-* This file, which has to contain the patterns it bans.
-* The ``name:`` line of ``SKILL.md``'s frontmatter. Installing this skill under a
-  second name to test it against a live model is the supported way to try a
-  change without disturbing the installed copy, and that rename is the one place
-  the engagement's name legitimately appears in a working tree. It is the skill's
-  own install identity, not customer content, and it is never what leaks. Without
-  this the suite cannot pass in the very clone you would use to validate a fix.
-
-No exception is made for a configured database or object prefix. Those are the
-identifiers most worth catching, and the composed app source that necessarily
-carries them is ignored by ``.gitignore`` instead -- out of scope because it
-cannot be committed, which is the honest reason, rather than allowlisted while
-still staged.
+Supply private deny terms through B2S_DENY_TERMS_FILE (one term per line).
+The file must be outside the repository. Matches are reported by path/category,
+not by quoting the confidential text. Binary files require manual review.
 """
+from __future__ import annotations
+import argparse
+import ast
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
 
-BANNED = re.compile(r"(?i)resmed|sfsenorthamerica|demo_hmahakali|himavarsh")
-# Word-boundary SPU, plus the object-prefix form. Deliberately case-sensitive on the
-# prefix form so it cannot be confused with unrelated lowercase text.
-SPU = re.compile(r"\bSPU\b|SPU_")
-
-SELF = "tests/check_identifiers.py"
-
-# The skill's own install name, in SKILL.md frontmatter. Anchored to `name:` at the
-# start of a line so it cannot excuse a customer identifier anywhere else in the
-# file -- the description, the trigger list and the body are all still scanned.
-RENAME_LINE = re.compile(r"^name:\s*\S+\s*$")
-
-# Max offending lines to print per file. A generated file carries hundreds of hits and
-# they are all the same problem; listing 15 of them buried the one hit in SKILL.md that
-# a reader needed to see. Report per file, with a count.
-PER_FILE = 3
+ROOT = Path(__file__).resolve().parents[1]
+GENERIC = [
+    ('local-home', re.compile(r'/(?:Users|home)/[A-Za-z0-9_.-]+/')),
+    ('fixed-connection', re.compile(r'default\s*=\s*[\"\']my-demo-account[\"\']')),
+    ('fixed-schema', re.compile(r'\{\{DB\}\}\.ANALYTICS\b')),
+    ('private-key', re.compile(r'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----')),
+]
 
 
-def is_local_rename(rel: str, line: str) -> bool:
-    """True for the one line that names the skill's own installed copy."""
-    return rel == "SKILL.md" and bool(RENAME_LINE.match(line))
+def staged_set(root):
+    return sorted(set(subprocess.run(['git', 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+        cwd=root, capture_output=True, check=True).stdout.decode().split('\0')) - {''})
 
 
-def flags(rel: str, line: str) -> bool:
-    """Whether this line, in this file, counts as a customer identifier.
-
-    The single decision point, so a test can assert on behaviour rather than on
-    the presence of string literals in this file. A syntactic test -- "no banned
-    name appears in quotes here" -- is evaded by any allowlist assembled from
-    fragments, and an allowlist is the tempting wrong fix for the composed app
-    source naming its own target database.
-    """
-    if is_local_rename(rel, line):
-        return False
-    return bool(BANNED.search(line) or SPU.search(line))
+def flags(rel, text, terms=()):
+    if any(term.casefold() in (rel + '\n' + text).casefold() for term in terms): return True
+    return any(pattern.search(text) for _, pattern in GENERIC)
 
 
-def staged_set(root: str) -> list[str]:
-    """Every path `git add -A` would stage: tracked plus untracked-not-ignored."""
-    out = subprocess.run(
-        ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
-        cwd=root, capture_output=True, text=True, check=True).stdout
-    return [p for p in out.split("\n") if p]
+def folded_strings(text):
+    """Catch literal concatenation in Python fixtures as well as visible text."""
+    try: tree = ast.parse(text)
+    except SyntaxError: return ''
+    def fold(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str): return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            left, right = fold(node.left), fold(node.right)
+            if left is not None and right is not None: return left + right
+        return None
+    return '\n'.join(value for node in ast.walk(tree) if (value := fold(node)) is not None)
 
 
-def main() -> int:
-    root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+def audit(root, terms=()):
+    findings = []
+    binaries = []
     files = staged_set(root)
-    by_file: dict[str, list[str]] = {}
-    for rel in files:
-        if rel == SELF:
+    for relative in files:
+        path = Path(root) / relative
+        if not path.exists(): continue
+        if path.is_symlink():
+            findings.append((relative, 'symlink requires review'))
             continue
-        try:
-            text = open(os.path.join(root, rel), encoding="utf-8").read()
-        except (UnicodeDecodeError, IsADirectoryError, FileNotFoundError):
+        try: text = path.read_bytes().decode('utf-8')
+        except UnicodeDecodeError:
+            binaries.append(relative)
             continue
-        for i, line in enumerate(text.split("\n"), 1):
-            if flags(rel, line):
-                by_file.setdefault(rel, []).append("%d: %s" % (i, line.strip()[:70]))
-
-    if by_file:
-        total = sum(len(v) for v in by_file.values())
-        print("  FAIL %d customer identifier(s) across %d file(s):"
-              % (total, len(by_file)))
-        for rel in sorted(by_file):
-            hits = by_file[rel]
-            print("      %s (%d)" % (rel, len(hits)))
-            for h in hits[:PER_FILE]:
-                print("        " + h)
-            if len(hits) > PER_FILE:
-                print("        ... and %d more in this file" % (len(hits) - PER_FILE))
-        return 1
-
-    print("  %d committable files, none carry a customer identifier" % len(files))
-    return 0
+        combined = text + ('\n' + folded_strings(text) if path.suffix == '.py' else '')
+        if flags(relative, combined, terms): findings.append((relative, 'identifier/environment match'))
+    return files, findings, binaries
 
 
-if __name__ == "__main__":
-    sys.exit(main())
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--root', default=str(ROOT))
+    parser.add_argument('--deny-terms-file', default=os.environ.get('B2S_DENY_TERMS_FILE'))
+    args = parser.parse_args(argv)
+    terms = []
+    if args.deny_terms_file:
+        path = Path(args.deny_terms_file).expanduser().resolve()
+        if path.is_relative_to(Path(args.root).resolve()):
+            parser.error('Private deny terms must live outside the repository')
+        terms = [line.strip() for line in path.read_text().splitlines() if line.strip()]
+    files, findings, binaries = audit(args.root, terms)
+    for path, category in findings: print(f'FAIL {path}: {category}')
+    for path in binaries: print(f'REVIEW {path}: binary/archive content not certified')
+    print(f'{len(files)} committable paths; {len(findings)} findings; {len(binaries)} binary review gaps')
+    if not terms: print('Generic checks only: supply a private deny-terms file for customer-specific coverage.')
+    return 1 if findings or binaries else 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

@@ -768,7 +768,7 @@ def extract_semantics(model_json: dict) -> dict:
                 "from_column": rel.get("fromColumn", ""),
                 "to_table": rel.get("toTable", ""),
                 "to_column": rel.get("toColumn", ""),
-                "cardinality": rel.get("fromCardinality", "many") + ":" + rel.get("toCardinality", "one"),
+                "cardinality": rel.get("fromCardinality", "") + ":" + rel.get("toCardinality", ""),
                 "cross_filter_behavior": rel.get("crossFilteringBehavior", "oneDirection"),
                 "is_active": rel.get("isActive", True),
             }
@@ -785,6 +785,8 @@ def extract_semantics(model_json: dict) -> dict:
             errors.append(err)
 
     result = {
+        "source_definition": root,
+        "roles": root.get("roles", []),
         "tables": tables,
         "dimensions": dimensions,
         "measures": all_measures,

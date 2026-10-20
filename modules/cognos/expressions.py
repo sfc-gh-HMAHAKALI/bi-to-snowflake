@@ -7,9 +7,8 @@ Two distinct jobs:
    (``_add_months``, ``_days_between``) whose argument order does not match
    Snowflake's ``DATEADD`` / ``DATEDIFF``.
 
-2. **Relative-time reduction** -- the part that actually matters for this model.
-   the reference model's 248 calculations do not compute date windows arithmetically. They
-   reference members of a materialised relative-time dimension:
+2. **Relative-time patterns** -- calculations can reference members of a
+   materialised relative-time dimension:
 
        [RELATIVE_TIME_DESC]->[all].[Week To Date]
      - [RELATIVE_TIME_DESC]->[all].[Prior Week To Date]
@@ -270,14 +269,9 @@ _MEMBER_ALIASES: dict[str, str] = {
     "prior 12 months": "previous 12 months",
 }
 
-# Members that depend on the reference model's fiscal calendar rather than the Gregorian one.
-#
-# These are deliberately NOT given CURRENT_DATE() arithmetic. the reference model's fiscal year
-# is offset from the calendar year, and medical-device fiscal calendars are often
-# 4-4-5 or 13-period, where quarter and month boundaries do not land on calendar
-# boundaries at all. Deriving them with a flat DATEADD offset produces metrics
-# that are wrong at every period boundary -- silently, and only at the
-# boundaries, which is the worst failure mode available.
+# Fiscal members require explicitly bound calendar definitions. Offset, 4-4-5
+# and 13-period calendars cannot be reconstructed from their display names.
+# A flat date offset is not evidence of correct period boundaries.
 #
 # The correct source is the fiscal columns already maintained in the model's own
 # date dimension. Each entry names what the window needs from that dimension, so
@@ -353,11 +347,8 @@ def extract_scalar_tail(expression: str) -> str:
     optionally multiplied back up: ``Last 3 Months / 3`` is a 3-month average,
     and ``(Last 3 Months / 3) * 12`` is an annual run rate.
 
-    Worth noting because it is easy to misread: the reference model model's
-    ``6 Months Rate`` is ``(Last 3 Months / 3) * 6`` -- a six-month projection
-    from a three-month base, not a six-month total annualised. The operators are
-    taken from the expression rather than inferred from the metric name for
-    exactly this reason.
+    Read operators from the expression, not from its display name. A label
+    containing a period length does not establish its calculation base.
     """
     m = _TRAILING_SCALAR_RE.search((expression or "").strip())
     if not m:
@@ -462,8 +453,7 @@ def translate_relative_time_calculation(
 ) -> dict[str, Any]:
     """Convert a Cognos relative-time calculation into a Snowflake expression.
 
-    Handles the two shapes that account for the whole the reference model calculation
-    library:
+    Handles these bounded expression patterns:
 
     * ``A - B``      -> a "change" metric (difference of two windows)
     * ``(A - B) / B`` -> a "growth" metric (ratio, NULLIF-guarded)

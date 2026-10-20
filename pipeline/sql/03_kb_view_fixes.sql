@@ -2,7 +2,7 @@
 -- Knowledge Base view corrections and measure-quality detection
 -- =====================================================================
 
-USE SCHEMA {{KB_DB}}.KNOWLEDGE_BASE;
+USE SCHEMA {{KB_DB}}.{{KB_SCHEMA}};
 
 -- The loader writes TERM_ROLE = 'measure' for items the source declares as
 -- facts; the original view filtered on the literal 'fact' and so counted zero.
@@ -38,10 +38,8 @@ GROUP BY ALL;
 -- ---------------------------------------------------------------------
 -- Measure quality
 -- ---------------------------------------------------------------------
--- The source model declares join keys as measures. In the reference model
--- FACT_SALES_SUMMARY declares CUST_ACCT_SITE_ID, INVENTORY_ITEM_ID,
--- ORDER_LINE_ID, CUSTOMER_TRX_LINE_ID, KIT_INVENTORY_ITEM_ID and two account
--- numbers all with usage=fact -- 7 of its 14 declared measures are identifiers.
+-- A source can declare a join key as a measure. Surface contradictory
+-- declarations for review; do not silently change the source semantics.
 --
 -- This matters because the declaration is what an automated conversion trusts.
 -- Taken literally it produces SUM(INVENTORY_ITEM_ID) as a business metric, which

@@ -1,299 +1,298 @@
-"""Single source for every object name this pipeline creates.
+"""Versioned run configuration and context-specific Snowflake identifiers.
 
-Before this module the same two database names were defined independently in four
-places (build.py, kb_loader.py, path1_catalog_glossary.py,
-path3_ossie_semantic_view.py) and hardcoded a further 625 times across the SQL. A
-build therefore could not target anything but the account it was first written
-against, and missing one definition produced a half-migrated run that failed at a
-random phase.
-
-Naming is now declared once here and reaches SQL through placeholder substitution
-in ``render_sql``. The placeholders are deliberately ``{{NAME}}`` rather than
-Python ``str.format`` braces, because the DDL is full of JSON bodies and
-``OBJECT_CONSTRUCT`` calls whose own braces would otherwise have to be escaped.
-
-Schema names (ANALYTICS, SALES_ANALYTICS, COMMON_ANALYTICS,
-KNOWLEDGE_BASE) are configurable here but are NOT templated into the SQL. They are
-generic, this pipeline creates them itself, and threading another ~850
-substitutions through the DDL would add risk without making the build any more
-portable.
+Explicit arguments override files even when their value equals a default. Source
+bindings never inherit generated-object destinations.
 """
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict, dataclass, field
 import json
-import os
+from pathlib import Path
 import re
-from dataclasses import dataclass, asdict, field
 
-# Unquoted Snowflake identifier: letter or underscore, then letters, digits,
-# underscores or dollar signs. Deliberately stricter than Snowflake itself, which
-# allows anything inside double quotes -- nothing in this pipeline quotes its
-# generated identifiers, and adding quoting to ~850 DDL sites to support a prefix
-# with a space in it would be a poor trade.
-_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_$]*\Z")
+
+
+def identifier(value: str) -> str:
+    """Return the logical name: fold unquoted input, preserve quoted input."""
+    if not isinstance(value, str) or not value:
+        raise ValueError("Identifier must be a nonempty string")
+    if value.startswith('"'):
+        if not re.fullmatch(r'"(?:[^"\x00-\x1f]|"")+"', value):
+            raise ValueError("Malformed quoted identifier")
+        name = value[1:-1].replace('""', '"')
+    elif _IDENTIFIER.fullmatch(value):
+        name = value.upper()
+    else:
+        raise ValueError("Use an unquoted identifier or double-quote the complete name")
+    if len(name) > 255:
+        raise ValueError("Identifier exceeds Snowflake's 255-character limit")
+    return name
+
+
+def quote(name: str) -> str:
+    """Serialize a logical identifier (not a dotted SQL expression)."""
+    if not isinstance(name, str) or not name or len(name) > 255 or any(ord(c) < 32 for c in name):
+        raise ValueError("Invalid logical identifier")
+    return '"' + name.replace('"', '""') + '"'
+
+
+def qualified(value: str, count: int = 3) -> tuple[str, ...]:
+    """Parse qualified identifiers without splitting dots within quoted names."""
+    if not isinstance(value, str):
+        raise ValueError("Qualified name must be a string")
+    tokens = re.findall(r'"(?:[^"\x00-\x1f]|"")*"|[A-Za-z_][A-Za-z0-9_$]*|\.', value)
+    if ''.join(tokens) != value or len(tokens) != count * 2 - 1 or any(t != '.' for t in tokens[1::2]):
+        raise ValueError(f"Expected {count} explicitly qualified identifier components: {value!r}")
+    return tuple(identifier(t) for t in tokens[::2])
+
+
+def fqn(*parts: str) -> str:
+    return '.'.join(quote(p) for p in parts)
+
+
+def literal(value: str) -> str:
+    return "'" + str(value).replace('\\', '\\\\').replace("'", "''") + "'"
 
 
 @dataclass(frozen=True)
 class Naming:
-    """Every name the build writes into the account.
-
-    ``prefix`` is the one knob most users will touch: it namespaces the objects a
-    build creates so two models can live in one account without colliding.
-    """
-
-    # Databases and schemas
+    # Internal legacy defaults remain for importing utility modules, not build input.
     database: str = "BI2SF"
     kb_database: str = "BI2SF_KB"
     kb_schema: str = "KNOWLEDGE_BASE"
     analytics_schema: str = "ANALYTICS"
-    source_schemas: tuple[str, ...] = ("SALES_ANALYTICS", "COMMON_ANALYTICS")
-
-    # Object prefix and the objects themselves
     prefix: str = "BI"
-    model_name: str = "SALES_BOOKINGS"
+    model_name: str = "MODEL"
     model_label: str = "BI Model"
+    source_schemas: tuple[str, ...] = ()
 
-    def __post_init__(self) -> None:
-        """Reject anything that cannot be a Snowflake identifier.
-
-        Every name below is concatenated into unquoted DDL, so a value that is not a
-        legal identifier does not fail here -- it fails partway through a build with a
-        SQL syntax error, after earlier phases have already committed.
-
-        This became a user-facing input path when the wizard started asking for the
-        prefix and model name, but it was already reachable: passing ``--prefix ''``
-        was accepted silently and produced ``ASK__ANALYST`` with a doubled underscore,
-        which is a legal identifier and so failed only at the verifier, reported as a
-        naming mismatch in the verifier rather than as bad input to the build.
-        """
-        for field_name in ("prefix", "model_name", "database", "kb_database",
-                           "kb_schema", "analytics_schema"):
-            value = getattr(self, field_name)
-            flag = "--" + field_name.replace("_", "-")
-            if not value or not value.strip():
-                raise ValueError(
-                    "%s cannot be empty. An empty prefix produces names like "
-                    "ASK__ANALYST, which are legal identifiers, so the build "
-                    "succeeds and only the verifier notices." % flag)
-            if not _IDENTIFIER.match(value):
-                raise ValueError(
-                    "%s=%r is not a usable Snowflake identifier. Letters, digits "
-                    "and underscores only, starting with a letter or underscore -- "
-                    "it is concatenated into unquoted DDL, so %r would fail mid-build "
-                    "with a SQL syntax error." % (flag, value, value))
-            # The longest suffix any property appends is _GLOSSARY_SEARCH (16), and
-            # app_service/compute_pool prepend the database and an underscore.
-            budget = 255 - len(self.database) - 17
-            if field_name in ("prefix", "model_name") and len(value) > budget:
-                raise ValueError(
-                    "%s=%r is too long: with database %r the derived names would "
-                    "exceed Snowflake's 255-character identifier limit."
-                    % (flag, value, self.database))
-        # Snowflake folds unquoted identifiers to upper case, so a lower-case prefix
-        # would be reported back to the user in one case and exist in another. Do that
-        # folding here instead, once, rather than letting the two drift.
-        for field_name in ("prefix", "model_name", "database", "kb_database",
-                           "kb_schema", "analytics_schema"):
-            value = getattr(self, field_name)
-            if value != value.upper():
-                object.__setattr__(self, field_name, value.upper())
+    def __post_init__(self):
+        for key in ('database', 'kb_database', 'kb_schema', 'analytics_schema', 'prefix', 'model_name'):
+            object.__setattr__(self, key, identifier(getattr(self, key)))
+        for name in (self.semantic_view, self.agent, self.ask_procedure, self.search_service,
+                     self.app_service, self.compute_pool):
+            quote(name)
 
     @property
-    def semantic_view(self) -> str:
-        """The deployed semantic view name -- prefixed, like every other object.
-
-        This is load-bearing in a way the other properties are not.
-        ``path3_ossie_semantic_view.py`` must name the OSSIE document's top-level
-        ``name:`` from *this* property, because that field is what Snowflake
-        actually creates. If the two disagree, every ``{{SEMANTIC_VIEW}}``
-        rendered into ``32_agent.sql``, ``45_reporting_views.sql`` and
-        ``51_caller_grants.sql`` refers to an object that was never created --
-        and none of that DDL validates the reference at creation time, so the
-        whole build reports ok and fails the first time someone asks the agent a
-        question. Do not special-case the semantic view out of the prefix.
-
-        Corollary: do not bake the prefix into ``--model-name`` as well, or the
-        deployed object is prefixed twice.
-        """
-        return "%s_%s" % (self.prefix, self.model_name)
-
+    def semantic_view(self): return f'{self.prefix}_{self.model_name}'
     @property
-    def agent(self) -> str:
-        return "%s_ANALYST" % self.prefix
-
+    def agent(self): return f'{self.prefix}_ANALYST'
     @property
-    def ask_procedure(self) -> str:
-        return "ASK_%s_ANALYST" % self.prefix
-
+    def ask_procedure(self): return f'ASK_{self.prefix}_ANALYST'
     @property
-    def search_service(self) -> str:
-        return "%s_GLOSSARY_SEARCH" % self.prefix
-
+    def search_service(self): return f'{self.prefix}_GLOSSARY_SEARCH'
     @property
-    def row_access_policy(self) -> str:
-        return "%s_TERRITORY_POLICY" % self.prefix
-
+    def row_access_policy(self): return f'{self.prefix}_ACCESS_POLICY'
     @property
-    def security_role(self) -> str:
-        return "%s_SECURITY_ADMIN" % self.prefix
-
+    def security_role(self): return f'{self.prefix}_SECURITY_ADMIN'
     @property
-    def app_stage(self) -> str:
-        return "%s_APP_STAGE" % self.prefix
-
+    def app_stage(self): return f'{self.prefix}_APP_STAGE'
     @property
-    def streamlit(self) -> str:
-        return "%s_REPORT" % self.prefix
-
+    def streamlit(self): return f'{self.prefix}_REPORT'
     @property
-    def stage_dir(self) -> str:
-        """Lowercase on purpose: Snowflake stage paths are case-sensitive."""
-        return "%s_report" % self.prefix.lower()
-
+    def stage_dir(self): return 'app'
     @property
-    def app_service(self) -> str:
-        return "%s_%s_REPORT" % (self.database, self.prefix)
-
+    def app_service(self): return f'{self.prefix}_{self.model_name}_REPORT'
     @property
-    def compute_pool(self) -> str:
-        return "%s_%s_SIS_POOL" % (self.database, self.prefix)
-
-    # Fully-qualified conveniences, so callers stop concatenating by hand.
+    def compute_pool(self): return f'{self.prefix}_{self.model_name}_POOL'
     @property
-    def kb(self) -> str:
-        return "%s.%s" % (self.kb_database, self.kb_schema)
-
+    def kb(self): return fqn(self.kb_database, self.kb_schema)
     @property
-    def analytics(self) -> str:
-        return "%s.%s" % (self.database, self.analytics_schema)
+    def analytics(self): return fqn(self.database, self.analytics_schema)
 
-    def substitutions(self) -> dict[str, str]:
-        """The placeholder table applied to the .sql files."""
-        return {
-            "KB_DB": self.kb_database,
-            "KB_SCHEMA": self.kb_schema,
-            "DB": self.database,
-            "ANALYTICS_SCHEMA": self.analytics_schema,
-            "PREFIX": self.prefix,
-            "SEMANTIC_VIEW": self.semantic_view,
-            "AGENT": self.agent,
-            "ASK_PROC": self.ask_procedure,
-            "SEARCH": self.search_service,
-            "POLICY": self.row_access_policy,
-            "SECURITY_ROLE": self.security_role,
-            "STAGE": self.app_stage,
-            "STAGE_DIR": self.stage_dir,
-            "STREAMLIT": self.streamlit,
-            "APP_SERVICE": self.app_service,
-            "POOL": self.compute_pool,
-            "MODEL_LABEL": self.model_label,
-        }
+    def substitutions(self):
+        names = {'DB': self.database, 'KB_DB': self.kb_database, 'KB_SCHEMA': self.kb_schema,
+                 'ANALYTICS_SCHEMA': self.analytics_schema, 'SEMANTIC_VIEW': self.semantic_view,
+                 'AGENT': self.agent, 'SEARCH': self.search_service, 'PREFIX': self.prefix}
+        return {key: quote(value) for key, value in names.items()}
 
 
 DEFAULT = Naming()
 
-_PLACEHOLDER = re.compile(r"\{\{([A-Z_]+)\}\}")
+
+def render_sql(text, naming=DEFAULT):
+    values = naming.substitutions()
+    def replace(match):
+        if match[1] not in values:
+            raise ValueError('Unknown identifier placeholder: ' + match[1])
+        return values[match[1]]
+    return re.sub(r'\{\{([A-Z_]+)\}\}', replace, text)
 
 
-def render_sql(text: str, naming: Naming = DEFAULT) -> str:
-    """Substitute ``{{NAME}}`` placeholders, failing loudly on an unknown one.
-
-    Failing loudly matters: a silently unreplaced placeholder becomes an invalid
-    Snowflake identifier and the phase fails halfway through a build, with the
-    earlier statements already committed.
-    """
-    table = naming.substitutions()
-    unknown = sorted({m.group(1) for m in _PLACEHOLDER.finditer(text)}
-                     - set(table))
-    if unknown:
-        raise KeyError("unknown SQL placeholder(s): %s" % ", ".join(unknown))
-    return _PLACEHOLDER.sub(lambda m: table[m.group(1)], text)
+def add_arguments(parser):
+    for key in ('database', 'kb_database', 'kb_schema', 'analytics_schema', 'prefix', 'model_name', 'model_label'):
+        parser.add_argument('--' + key.replace('_', '-'), default=argparse.SUPPRESS)
+    parser.add_argument('--naming-file')
 
 
-def add_arguments(ap: argparse.ArgumentParser) -> None:
-    """Attach the naming flags to any script that needs them."""
-    g = ap.add_argument_group("naming")
-    g.add_argument("--database", default=DEFAULT.database,
-                   help="Target database for the analytics layer "
-                        "(default: %(default)s)")
-    g.add_argument("--kb-database", default=DEFAULT.kb_database,
-                   help="Database holding the knowledge base "
-                        "(default: %(default)s)")
-    g.add_argument("--kb-schema", default=DEFAULT.kb_schema,
-                   help="Schema holding the knowledge base "
-                        "(default: %(default)s)")
-    g.add_argument("--analytics-schema", default=DEFAULT.analytics_schema,
-                   help="Schema for the governed views and agent. Currently fixed "
-                        "at %(default)s: the DDL hardcodes the schema names, so a "
-                        "different value is rejected rather than half-applied")
-    g.add_argument("--prefix", default=DEFAULT.prefix,
-                   help="Prefix namespacing every object this build creates, so "
-                        "two models can share an account (default: %(default)s)")
-    g.add_argument("--model-name", default=DEFAULT.model_name,
-                   help="Semantic view name, after the prefix "
-                        "(default: %(default)s)")
-    g.add_argument("--model-label", default=DEFAULT.model_label,
-                   help="Human label used in comments and tag values "
-                        "(default: %(default)s)")
-    g.add_argument("--naming-file", metavar="JSON",
-                   help="Read any of the above from a JSON file; explicit flags "
-                        "still win")
+def naming_from_values(values):
+    # Requote logical names before the dataclass normalizes user input.
+    return Naming(**{k: quote(v) if k in {'database', 'kb_database', 'kb_schema', 'analytics_schema', 'prefix', 'model_name'} else v
+                     for k, v in values.items()})
 
 
-def from_args(args: argparse.Namespace) -> Naming:
-    """Build a Naming from parsed flags, with --naming-file as the base layer."""
+def from_args(args):
     values = asdict(DEFAULT)
-    path = getattr(args, "naming_file", None)
-    if path:
-        with open(os.path.expanduser(path), encoding="utf-8") as fh:
-            loaded = json.load(fh)
-        unknown = sorted(set(loaded) - set(values))
-        if unknown:
-            raise KeyError("unknown key(s) in %s: %s" % (path, ", ".join(unknown)))
+    if getattr(args, 'naming_file', None):
+        loaded = read_json(args.naming_file)
+        if set(loaded) - set(values):
+            raise ValueError('Unknown naming configuration keys')
         values.update(loaded)
-
-    # An explicit flag beats the file. argparse cannot tell "given" from
-    # "defaulted", so compare against the dataclass default instead.
-    for key in list(values):
-        given = getattr(args, key, None)
-        if given is not None and given != getattr(DEFAULT, key):
-            values[key] = given
-
-    values["source_schemas"] = tuple(values["source_schemas"])
-
-    # The schema names are deliberately not templated into the SQL (see the module
-    # docstring), so {{ANALYTICS_SCHEMA}} appears zero times in pipeline/sql/ and
-    # the DDL creates its objects in a hardcoded ANALYTICS. Four Python consumers
-    # -- build.py's stage path, kb_to_inventory, path3's target schema and
-    # verify_deployment -- do follow this value. Honouring it here while the DDL
-    # ignores it is a split brain: the views get created in ANALYTICS and the
-    # verifier looks somewhere else. Reject it instead of half-applying it.
-    if values["analytics_schema"] != DEFAULT.analytics_schema:
-        raise SystemExit(
-            "--analytics-schema is not supported: the DDL in pipeline/sql/ hardcodes "
-            "the schema names, so only %r works. Passing %r would create objects in "
-            "%s while the verifier, the agent and the app inventory looked in %r. "
-            "Change the database with --database instead."
-            % (DEFAULT.analytics_schema, values["analytics_schema"],
-               DEFAULT.analytics_schema, values["analytics_schema"])
-        )
-    # A bad --prefix is a typo, not a bug. Report it as one line rather than a
-    # traceback through dataclass internals, which reads as a broken pipeline.
-    try:
-        return Naming(**values)
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from None
+    for key in values:
+        if hasattr(args, key):
+            values[key] = getattr(args, key)
+    return Naming(**values)
 
 
-def forward_flags(naming: Naming) -> list[str]:
-    """The flags needed to reproduce this naming in a child process."""
-    return [
-        "--database", naming.database,
-        "--kb-database", naming.kb_database,
-        "--kb-schema", naming.kb_schema,
-        "--analytics-schema", naming.analytics_schema,
-        "--prefix", naming.prefix,
-        "--model-name", naming.model_name,
-        "--model-label", naming.model_label,
-    ]
+def forward_flags(naming):
+    return [arg for key, value in asdict(naming).items() if key != 'source_schemas'
+            for arg in ('--' + key.replace('_', '-'), quote(value) if key != 'model_label' else value)]
+
+
+def read_json(path):
+    with Path(path).expanduser().open(encoding='utf-8') as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise ValueError(f'{path}: expected a JSON object')
+    return value
+
+
+@dataclass
+class RunConfig:
+    version: int = 1
+    database: str = ''
+    analytics_schema: str = ''
+    kb_database: str = ''
+    kb_schema: str = 'KNOWLEDGE_BASE'
+    prefix: str = 'BI'
+    model_name: str = 'MODEL'
+    model_label: str = 'BI Model'
+    connection: str = ''
+    warehouse: str = ''
+    role: str = ''
+    grant_role: str = ''
+    source_type: str = ''
+    extract: str = ''
+    inventory: str = ''
+    output_dir: str = ''
+    outputs: list[str] = field(default_factory=lambda: ['semantic'])
+    deploy: str = 'none'
+    source_mappings: dict[str, str] = field(default_factory=dict)
+    # Reviewed replacements are keyed by the stable item reference printed in issues.json.
+    translations: dict[str, str] = field(default_factory=dict)
+    relationship_mappings: dict[str, dict] = field(default_factory=dict)
+    security: dict = field(default_factory=dict)
+    glossary_search: bool = False
+    chat: bool = False
+    compute_pool: str = ''
+    external_access_integrations: list[str] = field(default_factory=list)
+    container_image: str = ''
+
+    def validate(self):
+        if self.version != 1:
+            raise ValueError('Unsupported run configuration version')
+        for key in ('database', 'analytics_schema', 'output_dir'):
+            if not getattr(self, key):
+                raise ValueError(f'Missing --{key.replace("_", "-")}; choose it explicitly or use --guided')
+        if not self.inventory and not self.extract:
+            raise ValueError('Provide --inventory or --extract')
+        if self.inventory and self.extract:
+            raise ValueError('Choose --inventory OR --extract, not both')
+        if self.extract and self.source_type not in ('cognos', 'tableau', 'powerbi', 'looker', 'denodo', 'businessobjects'):
+            raise ValueError('--extract requires --source-type: cognos/tableau/powerbi/looker/denodo/businessobjects')
+        if not isinstance(self.outputs, list) or not self.outputs or set(self.outputs) - {'semantic', 'agent', 'catalog', 'streamlit', 'react'}:
+            raise ValueError('outputs must be a nonempty list of semantic, agent, catalog, streamlit, react')
+        if self.deploy not in ('none', 'local', 'streamlit', 'react', 'all', 'both'):
+            raise ValueError('Invalid deploy mode')
+        for key in ('database', 'analytics_schema', 'kb_database', 'kb_schema', 'prefix', 'model_name',
+                    'model_label', 'connection', 'warehouse', 'role', 'grant_role', 'source_type',
+                    'extract', 'inventory', 'output_dir', 'deploy', 'compute_pool', 'container_image'):
+            if not isinstance(getattr(self, key), str):
+                raise ValueError(f'{key} must be a string')
+        for key in ('source_mappings', 'translations', 'relationship_mappings', 'security'):
+            if not isinstance(getattr(self, key), dict):
+                raise ValueError(f'{key} must be an object')
+        if any(not isinstance(value, str) for value in self.translations.values()):
+            raise ValueError('translations values must be SQL expression strings')
+        if any(not isinstance(value, dict) for value in self.relationship_mappings.values()):
+            raise ValueError('relationship_mappings values must be objects')
+        for value in self.source_mappings.values():
+            qualified(value)
+        for key in ('warehouse', 'role', 'grant_role'):
+            if getattr(self, key): identifier(getattr(self, key))
+        for key in ('glossary_search', 'chat'):
+            if not isinstance(getattr(self, key), bool): raise ValueError(key + ' must be Boolean')
+        if self.compute_pool: identifier(self.compute_pool)
+        if not isinstance(self.external_access_integrations, list): raise ValueError('external_access_integrations must be a list')
+        for name in self.external_access_integrations: identifier(name)
+        if self.glossary_search and not self.warehouse: raise ValueError('glossary_search requires warehouse')
+        if self.chat and not set(self.outputs) & {'streamlit', 'react'}: raise ValueError('chat requires an app output')
+        hosted = self.hosted_outputs
+        if hosted and (not self.compute_pool or not self.warehouse or not self.role):
+            raise ValueError('Hosted outputs require explicit compute_pool, warehouse and owner role')
+        if 'streamlit' in hosted and not self.external_access_integrations:
+            raise ValueError('Hosted Streamlit dependencies require explicit external_access_integrations')
+        if 'react' in hosted and not re.fullmatch(r'/[A-Za-z0-9_$.-]+/[A-Za-z0-9_$.-]+/[A-Za-z0-9_$.-]+/[a-z0-9_.-]+(?::[A-Za-z0-9_.-]+|@sha256:[a-f0-9]{64})', self.container_image):
+            raise ValueError('Hosted React requires an explicit Snowflake container_image /database/schema/repository/image:tag')
+        if 'react' in hosted and not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,61}[A-Za-z0-9]', self.naming.app_service):
+            raise ValueError('Hosted service name must be a DNS-compatible identifier of at most 63 characters')
+        self.naming  # validate destination identifiers and derived names
+        self.output_dir = str(Path(self.output_dir).expanduser().resolve())
+        for key in ('inventory', 'extract'):
+            if getattr(self, key):
+                setattr(self, key, str(Path(getattr(self, key)).expanduser().resolve()))
+        return self
+
+    @property
+    def naming(self):
+        return Naming(database=self.database, analytics_schema=self.analytics_schema,
+                      kb_database=self.kb_database or self.database, kb_schema=self.kb_schema,
+                      prefix=self.prefix, model_name=self.model_name, model_label=self.model_label)
+
+    @property
+    def effective_outputs(self):
+        result = set(self.outputs)
+        if self.chat: result.add('agent')
+        if self.glossary_search: result.add('catalog')
+        if result & {'agent', 'streamlit', 'react'}: result.add('semantic')
+        return sorted(result)
+
+    @property
+    def hosted_outputs(self):
+        if self.deploy in ('none', 'local'): return set()
+        requested = {'streamlit', 'react'} if self.deploy in ('all', 'both') else {self.deploy}
+        if not requested <= set(self.outputs): raise ValueError('Hosting choice requires matching app outputs')
+        return requested
+
+    def public_dict(self):
+        return asdict(self)  # only connection name; never credentials
+
+
+def resolve(args):
+    values = asdict(RunConfig())
+    for path in (getattr(args, 'resume', None), getattr(args, 'config', None), getattr(args, 'naming_file', None)):
+        if path:
+            source = Path(path).expanduser()
+            if source.is_dir(): source = source / 'resolved-config.json'
+            loaded = read_json(source)
+            if set(loaded) - set(values):
+                raise ValueError('Unknown configuration keys: ' + ', '.join(sorted(set(loaded) - set(values))))
+            values.update(loaded)
+    for key in values:
+        if hasattr(args, key): values[key] = getattr(args, key)
+    if isinstance(values['outputs'], str):
+        values['outputs'] = [v.strip() for v in values['outputs'].split(',') if v.strip()]
+    return RunConfig(**values)
+
+
+def guided(settings, ask=input):
+    """Prompt only for unresolved required values; returned config is reusable."""
+    for key, suggestion in (('database', 'BI_WORK'), ('analytics_schema', 'ANALYTICS'),
+                            ('output_dir', str(Path.cwd() / 'b2s-output'))):
+        if not getattr(settings, key):
+            setattr(settings, key, ask(f'{key} [{suggestion}]: ').strip() or suggestion)
+    if not settings.inventory and not settings.extract:
+        settings.inventory = ask('Unified inventory JSON path: ').strip()
+    return settings

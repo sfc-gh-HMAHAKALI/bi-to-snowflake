@@ -20,10 +20,10 @@ def test_loader_targets_kb_database_not_analytics_database():
 
     loader = KnowledgeBaseLoader(
         runner=None, source_system="cognos", source_model="M", load_id="L",
-        schema_map={}, kb_database="SALESKB",
+        schema_map={}, kb_database="LIBRARY_KB",
     )
-    assert loader.target_database == "SALESKB", (
-        "loader targets %r, expected the KB database SALESKB" % loader.target_database
+    assert loader.target_database == "LIBRARY_KB", (
+        "loader targets %r, expected the KB database LIBRARY_KB" % loader.target_database
     )
 
     statements = []
@@ -33,8 +33,8 @@ def test_loader_targets_kb_database_not_analytics_database():
     loader._merge("KB_TERM", ["TERM_ID"], ["TERM_ID", "NAME"],
                   [["'t1'", "'Sales'"]], "terms")
     sql = statements[0]
-    assert "MERGE INTO SALESKB.KNOWLEDGE_BASE.KB_TERM" in sql, sql[:150]
-    print("  loader MERGEs into the KB database (SALESKB), not the analytics one")
+    assert 'MERGE INTO "LIBRARY_KB"."KNOWLEDGE_BASE"."KB_TERM"' in sql, sql[:150]
+    print("  loader MERGEs into the KB database (LIBRARY_KB), not the analytics one")
 
 
 def test_main_wires_kb_database_flag():
@@ -42,7 +42,7 @@ def test_main_wires_kb_database_flag():
     src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "pipeline", "kb_loader.py")).read()
     call = src[src.index("loader = KnowledgeBaseLoader("):src.index("loader.load_source_model")]
-    assert "args.kb_database" in call, "call site does not pass args.kb_database:\n%s" % call
+    assert "naming.kb_database" in call, "call site does not pass args.kb_database:\n%s" % call
     assert "args.database,\n    )" not in call, "call site still passes args.database as the KB target"
     print("  main() wires args.kb_database into the loader")
 
@@ -61,13 +61,13 @@ def test_path1_honours_kb_naming_flags():
 
     ap = argparse.ArgumentParser()
     config.add_arguments(ap)
-    args = ap.parse_args(["--kb-database", "CUSTOMER_KB", "--kb-schema", "GOVERNED"])
+    args = ap.parse_args(["--kb-database", "WEATHER_METADATA", "--kb-schema", "GOVERNED"])
     P.KB = config.from_args(args).kb
-    assert P.KB == "CUSTOMER_KB.GOVERNED", P.KB
+    assert P.KB == '"WEATHER_METADATA"."GOVERNED"', P.KB
 
     for fn in ("tag_ddl", "glossary_ddl", "glossary_load"):
         out = getattr(P, fn)()
-        assert "CUSTOMER_KB.GOVERNED" in out, "%s ignored the naming flags" % fn
+        assert '"WEATHER_METADATA"."GOVERNED"' in out, "%s ignored the naming flags" % fn
         assert "BI2SF_KB" not in out, "%s baked in the default KB database" % fn
 
     # An import-time f-string constant would silently reintroduce the bug.
@@ -110,7 +110,7 @@ def test_merge_uses_a_values_list_not_a_union_all_chain() -> None:
         assert s.startswith("MERGE INTO"), "no longer a MERGE"
         assert "ON t.C1 = s.C1" in s, "natural-key ON clause changed"
         assert "WHEN MATCHED THEN UPDATE" in s and "WHEN NOT MATCHED THEN INSERT" in s
-        assert "MYKB.KNOWLEDGE_BASE.KB_THING" in s, "wrong target database"
+        assert '"MYKB"."KNOWLEDGE_BASE"."KB_THING"' in s, "wrong target database"
     print("  MERGE uses one VALUES list, keeps MERGE-on-natural-key semantics")
 
 
@@ -281,13 +281,8 @@ def test_an_unrecognised_expression_falls_back_instead_of_emitting_bad_sql() -> 
 def test_reported_row_counts_cover_every_batch_not_just_the_last() -> None:
     """The row count in the summary must be the whole input, not the last batch.
 
-    A multi-batch table reported the size of its final batch: 19,051 rows came back
-    as 51, 4,070 as 70, 4,550 as 50 -- every error an exact multiple of BATCH, which
-    is the tell. The cause was one line in _merge assigning to `rows`, the function's
-    own parameter, inside the per-batch loop, so `total = len(rows)` afterwards saw
-    only what was left there. The data written was always correct, which is why
-    nothing else caught it: only the number we reported was wrong, and it under-
-    reported, so it never looked like a duplicate-row problem.
+    Rebinding `rows` to the final batch loses the full-input count. Keep that
+    input untouched and report across all batches.
 
     Asserted with more rows than one batch holds, because with a single batch the
     bug is invisible -- the last batch is the whole input.
@@ -383,15 +378,9 @@ def test_the_knowledge_base_load_narrates_itself() -> None:
     assert first_announce < first_result, \
         "the table is only reported after it is written -- the wait stays silent"
 
-    # (iii) build.py streams this phase.
-    b = open(os.path.join(SRC, "pipeline", "build.py"), encoding="utf-8").read()
-    assert "stream: bool = False" in b, "Phase has no stream flag"
-    assert "stream=p.stream" in b, "the flag is never passed to run_py"
-    kb_decl = b[b.index('Phase("kb-load"'):]
-    kb_decl = kb_decl[:kb_decl.index("),")]
-    assert "stream=True" in kb_decl, \
-        "the knowledge base load does not stream, so its narration is captured and lost"
-    print("  the load names every table, announces it before writing, and streams")
+    # The loader remains a standalone utility; the offline orchestrator no longer
+    # invokes a live KB load implicitly. Its own progress callbacks still work.
+    print("  the standalone load names every table and announces it before writing")
 
 
 if __name__ == "__main__":

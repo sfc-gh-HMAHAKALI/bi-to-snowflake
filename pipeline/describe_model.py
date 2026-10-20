@@ -104,9 +104,7 @@ def _what_repeats(clones: dict) -> list[str]:
         "they are the clearest measure of how much of the model is one idea stated "
         "many times, and therefore how much simpler the Snowflake version can be.\n")
     if fams and cloned:
-        # The most-cloned family, tie-broken by the longer name, which in practice
-        # picks something recognisable like FACT_SALES_SUMMARY over a two-letter
-        # abbreviation. Alphabetical order picked "AM", which illustrates nothing.
+        # Prefer a longer readable label when clone counts tie.
         example = max(fams.items(), key=lambda kv: (len(kv[1]), len(kv[0])), default=None)
         out.append(
             "- **%s objects are fiscal-year copies**, across %d families. "
@@ -142,10 +140,9 @@ def _how_access_works(sa: dict) -> list[str]:
         return []
     out = ["## How access is controlled\n"]
     out.append(
-        "%s row-level security filters, for %s distinct groups. That sounds like a "
-        "migration in itself, but they reduce to **%d shapes** -- the filters differ "
-        "only in the values they compare against:\n"
-        % (_fmt(total), _fmt(ss.get("distinct_principals") or 0), len(shapes)))
+        '%s security filters for %s distinct principals mention **%d column shapes**. '
+        'These are inspection counts, not proof that predicates or entitlements are equivalent:\n'
+        % (_fmt(total), _fmt(ss.get('distinct_principals') or 0), len(shapes)))
     out.append("| Filtered on | Filters |")
     out.append("|---|---:|")
     for s in shapes:
@@ -154,8 +151,8 @@ def _how_access_works(sa: dict) -> list[str]:
             _fmt(s.get("filter_count") or 0)))
     out.append("")
     out.append(
-        "One row access policy per shape reproduces all %s, driven by a mapping table "
-        "rather than %s hand-written predicates.\n" % (_fmt(total), _fmt(total)))
+        'Policy translation requires complete predicate logic and explicit principal mappings. '
+        'Column shapes do not establish policy count, equivalence or hierarchy inheritance.\n')
     return out
 
 

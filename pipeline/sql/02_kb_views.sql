@@ -13,7 +13,7 @@
 -- so a consumer can filter to one model or span the whole estate.
 -- =====================================================================
 
-USE SCHEMA {{KB_DB}}.KNOWLEDGE_BASE;
+USE SCHEMA {{KB_DB}}.{{KB_SCHEMA}};
 
 -- ---------------------------------------------------------------------
 -- Glossary
@@ -104,7 +104,7 @@ SELECT
 FROM KB_METRIC;
 
 -- ---------------------------------------------------------------------
--- Hierarchy tree (drives the business-user item picker, requirement A2)
+-- Source hierarchy tree
 -- ---------------------------------------------------------------------
 
 CREATE OR REPLACE VIEW KB_V_HIERARCHY_TREE
@@ -170,16 +170,14 @@ LEFT JOIN KB_ENTITY e
 -- ---------------------------------------------------------------------
 
 CREATE OR REPLACE VIEW KB_V_SECURITY_RULES
-COMMENT = 'Row-security rules with the level number abstracted, to show how few policies are needed.'
+COMMENT = 'Descriptive row-security column patterns; not an executable policy or policy count.'
 AS
 SELECT
     SOURCE_SYSTEM,
     SOURCE_MODEL,
     ROLE_GROUP,
     COLUMN_NAME,
-    -- TERRITORY_LEVEL4 and TERRITORY_LEVEL2 are the same rule at different
-    -- depths. Generalising the level number is what turns a per-level policy
-    -- count into a per-pattern one.
+    -- Similar column names do not establish equivalent predicates or entitlements.
     REGEXP_REPLACE(COLUMN_NAME, '[0-9]+$', '#') AS COLUMN_PATTERN,
     COUNT(DISTINCT PRINCIPAL)                    AS PRINCIPAL_COUNT,
     COUNT(DISTINCT COLUMN_VALUE)                 AS DISTINCT_VALUES,
@@ -188,7 +186,7 @@ FROM KB_SECURITY_MAPPING
 GROUP BY ALL;
 
 CREATE OR REPLACE VIEW KB_V_SECURITY_COLLAPSE
-COMMENT = 'How many source filter definitions collapse into how many Snowflake policies.'
+COMMENT = 'Source filter and mapping counts for review; policy equivalence is not inferred.'
 AS
 SELECT
     r.SOURCE_SYSTEM,
@@ -198,10 +196,7 @@ SELECT
     (SELECT COUNT(*) FROM KB_SECURITY_MAPPING m
       WHERE m.SOURCE_SYSTEM = r.SOURCE_SYSTEM
         AND m.SOURCE_MODEL  = r.SOURCE_MODEL)       AS MAPPING_ROWS,
-    (SELECT COUNT(DISTINCT REGEXP_REPLACE(m.COLUMN_NAME, '[0-9]+$', '#'))
-       FROM KB_SECURITY_MAPPING m
-      WHERE m.SOURCE_SYSTEM = r.SOURCE_SYSTEM
-        AND m.SOURCE_MODEL  = r.SOURCE_MODEL)       AS POLICY_PATTERNS_REQUIRED
+    NULL::NUMBER                                    AS POLICY_PATTERNS_REQUIRED
 FROM KB_SECURITY_RULE r
 GROUP BY r.SOURCE_SYSTEM, r.SOURCE_MODEL;
 

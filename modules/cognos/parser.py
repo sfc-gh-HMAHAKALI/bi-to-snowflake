@@ -1,10 +1,7 @@
 """Cognos Framework Manager `model.xml` parser.
 
-Uses ``iterparse`` rather than a full-tree parse. A real Framework Manager
-export is large -- the reference model is 18MB with 57,763 ``refobj`` nodes and
-19,921 ``securityFilterDefinition`` nodes -- and building the whole DOM before
-extracting costs several hundred MB of resident memory for no benefit, since
-every construct we care about is self-contained within one element subtree.
+Uses ``iterparse`` to release completed subtrees and limit memory consumption
+on large Framework Manager exports.
 
 The parse is single-pass. Each top-level construct is handled when its closing
 tag is reached, then ``elem.clear()`` releases the subtree. Ancestors are
@@ -33,7 +30,7 @@ _MAX_MEMBER_COUNT = 10_000
 # (".../bmt/60/12") that differs across Cognos releases.
 _NS_RE = re.compile(r"^\{[^}]*\}")
 
-# A Cognos object reference: "[Import View].[FACT_SALES_SUMMARY].[PROCESSED_DATE]"
+# A Cognos object reference: "[Import View].[OBSERVATIONS].[PROCESSED_DATE]"
 _REFOBJ_PART_RE = re.compile(r"\[([^\]]*)\]")
 
 # Constructs we handle at close tag. Anything else is skipped but counted, so
@@ -86,8 +83,8 @@ def _name_of(elem: ET.Element) -> str:
 def parse_refobj(ref: str) -> dict[str, str]:
     """Split a Cognos object reference into its bracketed parts.
 
-    ``[Import View].[FACT_SALES_SUMMARY].[PROCESSED_DATE]`` becomes
-    ``{"namespace": "Import View", "object": "FACT_SALES_SUMMARY",
+    ``[Import View].[OBSERVATIONS].[PROCESSED_DATE]`` becomes
+    ``{"namespace": "Import View", "object": "OBSERVATIONS",
     "item": "PROCESSED_DATE"}``.
 
     Four-part references occur inside DMR hierarchies
@@ -153,9 +150,7 @@ def map_cognos_datatype(
     DATE column as ``dateTime``, sometimes with ``scale`` 6, which looks like a
     timestamp but is not: every such item in the observed models carries
     ``precision`` 0 and ``size`` 12. A genuine timestamp reports a nonzero
-    precision. So precision, not scale, is the discriminator -- keying off scale
-    alone misclassifies 168 of the 285 date columns in the reference model as
-    TIMESTAMP_NTZ, which would then generate wrong DDL for the physical layer.
+    precision. Inspect precision as well as scale before choosing the type.
     """
     key = (datatype or "unknown").strip().lower()
     mapped = _DATATYPE_MAP.get(key, "VARCHAR")
@@ -181,7 +176,7 @@ def map_cognos_datatype(
 # Query subject / query item
 # ---------------------------------------------------------------------------
 
-# "Select * from [RAPID_Snowflake_Heavy1].DIM_DATE" -> passthrough.
+# "Select * from [SOURCE_CONNECTION].DIM_DATE" -> passthrough.
 # Anything with a WHERE, JOIN, CASE, or a column list is not a passthrough.
 _PASSTHROUGH_RE = re.compile(
     r"^\s*select\s+(distinct\s+)?\*\s+from\s+\[?([\w$]+)\]?\.\[?([\w$.]+)\]?\s*;?\s*$",
@@ -327,7 +322,7 @@ def _parse_query_subject(qs: ET.Element, namespace: str) -> dict[str, Any]:
         sources = _child(db_query, "sources")
         if sources is not None:
             # The connection is referenced by <dataSourceRef>, not <refobj>:
-            #   [].[dataSources].[RAPID_Snowflake_Heavy]
+            #   [].[dataSources].[SOURCE_CONNECTION]
             ds_refs = [_text(d) for d in _children(sources, "dataSourceRef")]
             if not ds_refs:
                 ds_refs = _refobjs(sources)
@@ -365,7 +360,7 @@ def _parse_query_subject(qs: ET.Element, namespace: str) -> dict[str, Any]:
                     wraps.append(obj)
 
     # Filters attached to the query subject itself. These are real model logic --
-    # the model-layer FACT_SALES_SUMMARY carries PROCESSED_DATE <= CURRENT_DATE --
+    # the model-layer OBSERVATIONS carries PROCESSED_DATE <= CURRENT_DATE --
     # so a conversion that ignores them silently widens the row set.
     filters: list[dict[str, Any]] = []
     for holder in (container, qs):
@@ -604,7 +599,7 @@ def _parse_dimension(dim: ET.Element, namespace: str) -> dict[str, Any]:
 # Security filter definition
 # ---------------------------------------------------------------------------
 
-# "CAMID(":SALES:REGION:AREA-ROLE:EAST_GREATLAKES_AREA_CLEVELAND")"
+# Example shape: CAMID(":LIBRARY:COLLECTION:READERS")
 _CAMID_RE = re.compile(r'CAMID\(\s*"?:?([^")]*)"?\s*\)')
 # A single equality predicate against a string literal.
 _EQ_PRED_RE = re.compile(r"\[([^\]]+)\]\s*=\s*'([^']*)'")
@@ -613,11 +608,9 @@ _EQ_PRED_RE = re.compile(r"\[([^\]]+)\]\s*=\s*'([^']*)'")
 def _parse_security_filter(sf: ET.Element) -> dict[str, Any]:
     """Parse one <securityFilterDefinition> into a row-level-security rule.
 
-    Each definition binds a Cognos account/group to a row filter. In the reference model
-    model these are almost all of the form
-    ``ROLE = '<role>' AND TERRITORY_LEVEL4 = '<territory>'`` -- i.e. a two-column
-    mapping from principal to (role, territory), which is exactly the shape of a
-    Snowflake row access policy mapping table.
+    Retain the complete expression and principal. Extracted column/value pairs
+    are inspection hints only: they do not preserve general Boolean logic and
+    must not be treated as executable entitlements.
     """
     so = _child(sf, "securityObject")
     display_path = _text(_child(so, "displayPath")) if so is not None else ""

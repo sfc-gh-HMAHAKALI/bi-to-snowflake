@@ -90,6 +90,10 @@ def build_unified_inventory(
         record = fail_step("build_unified_inventory", e, partial_results=inventory)
         inventory["errors"].append(record)
 
+    # Retain unnormalized source metadata for translation/security review. A parser
+    # capability gap is not evidence that the source has no restrictions.
+    inventory["source_metadata"] = parsed_data
+
     # Tally complexity
     for item_list in [inventory["dimensions"], inventory["facts"], inventory["metrics"]]:
         for item in item_list:
@@ -150,6 +154,7 @@ def merge_inventories(inventories: list[dict]) -> dict:
     # Track which source each merged inventory came from, so a multi-tool merge
     # (a Cognos model plus a Power BI model) stays attributable downstream.
     merged["source_types"] = [inv.get("source_type", "unknown") for inv in inventories]
+    merged["source_metadata"] = {"inputs": [inv.get("source_metadata", {}) for inv in inventories]}
 
     for inv in inventories:
         for table in inv.get("tables", []):
@@ -157,6 +162,8 @@ def merge_inventories(inventories: list[dict]) -> dict:
             if tname and tname not in seen_tables:
                 merged["tables"].append(table)
                 seen_tables.add(tname)
+            elif tname:
+                merged["errors"].append({"message": "Duplicate entity in merged sources; assign explicit distinct aliases", "entity": tname})
 
         merged["relationships"].extend(inv.get("relationships", []))
         merged["dimensions"].extend(inv.get("dimensions", []))
@@ -271,13 +278,22 @@ def _from_tableau(parsed: dict, inv: dict) -> None:
     for ds in parsed.get("datasources", []):
         ds_name = ds.get("name", "UNKNOWN")
 
-        # Tables
-        for table in ds.get("tables", []):
-            inv["tables"].append({
-                "name": table.get("name", "").strip("[]").replace(".", "_").upper(),
-                "physical_table": table.get("name", ""),
-                "connection": ds.get("connection", {}),
-            })
+        # A datasource field has no physical-table binding in multi-table exports.
+        # Keep its logical datasource scope; ambiguous bindings block downstream.
+        source_tables = ds.get("tables", [])
+        connection = ds.get("connection", {})
+        inv["tables"].append({
+            "name": ds_name,
+            "physical_table": source_tables[0].get("table", "") if len(source_tables) == 1 else "",
+            "database": connection.get("dbname", ""),
+            "schema": connection.get("schema", ""),
+        })
+        if len(source_tables) != 1 or ds.get("joins"):
+            inv["flagged"].append({"source": ds_name, "reason": "Multi-table Tableau datasource needs explicit logical bindings"})
+        for key in ("filters", "groups", "bins", "parameters"):
+            if ds.get(key):
+                inv["flagged"].append({"source": ds_name, "reason": "Preserve Tableau " + key, "original": ds[key]})
+        inv["errors"].extend(ds.get("errors", []))
 
         # Joins
         for join in ds.get("joins", []):
@@ -289,7 +305,7 @@ def _from_tableau(parsed: dict, inv: dict) -> None:
             })
 
         # Columns
-        for col in ds.get("columns", []):
+        for col in ds.get("columns", []) + ds.get("calculated_fields", []):
             role = col.get("role", "dimension")
             complexity = col.get("complexity", "simple")
 
@@ -300,8 +316,8 @@ def _from_tableau(parsed: dict, inv: dict) -> None:
             page_name = ", ".join(sorted({u[1] for u in usages})) if usages else ""
 
             item = _normalize_item(
-                name=col.get("caption", col_name),
-                expr=col.get("formula", f"{ds_name}.{col_name}"),
+                name=col.get("caption") or col_name.strip("[]"),
+                expr=col.get("formula") or col_name,
                 data_type=_map_tableau_type(col.get("datatype", "string")),
                 table=ds_name,
                 description=col.get("desc", ""),
@@ -428,7 +444,7 @@ def _from_looker(parsed: dict, inv: dict) -> None:
                 "left_table": explore.get("from", explore.get("name", "")).upper(),
                 "right_table": join.get("name", "").upper(),
                 "join_type": join.get("type", "left_outer"),
-                "relationship_type": join.get("relationship", "many_to_one"),
+                "relationship_type": join.get("relationship", ""),
                 "condition": join.get("sql_on", ""),
             })
 
@@ -469,6 +485,8 @@ def _from_powerbi(parsed: dict, inv: dict) -> None:
             "name": tname,
             "physical_table": table.get("name", ""),
             "source_query": table.get("source_query"),
+            "sql": table.get("source_query") or "",
+            "is_passthrough": False,
         })
 
         for col in table.get("columns", []):
@@ -476,16 +494,16 @@ def _from_powerbi(parsed: dict, inv: dict) -> None:
             _, pg, wg = _resolve_pbi_prov(tname_orig, col_name)
             item = _normalize_item(
                 name=col_name,
-                expr=f"{tname}.{col.get('source_column', col_name)}",
+                expr=col.get("expression") if col.get("is_calculated") else '"' + (col.get('source_column') or col_name).replace('"', '""') + '"',
                 data_type=_map_pbi_type(col.get("data_type", "string")),
                 table=tname,
-                complexity=col.get("complexity", "simple"),
+                complexity="needs_translation" if col.get("is_calculated") else col.get("complexity", "simple"),
                 original=col,
                 source_view=table.get("name", ""),
                 page_name=pg,
                 widget_name=wg,
             )
-            if col.get("summarize_by", "none") != "none":
+            if col.get("summarize_by", "none") not in ("none", "default", "", None):
                 inv["facts"].append(item)
             else:
                 inv["dimensions"].append(item)
@@ -498,7 +516,7 @@ def _from_powerbi(parsed: dict, inv: dict) -> None:
             name=m_name,
             expr=measure.get("expression", ""),
             data_type="NUMBER",
-            table=m_table,
+            table=m_table.upper(),
             description=measure.get("description", ""),
             complexity=measure.get("complexity", "simple"),
             original=measure,
@@ -522,57 +540,77 @@ def _from_powerbi(parsed: dict, inv: dict) -> None:
             "left_column": rel.get("from_column", ""),
             "right_table": rel.get("to_table", "").upper(),
             "right_column": rel.get("to_column", ""),
-            "relationship_type": rel.get("cardinality", "many_to_one"),
+            "relationship_type": rel.get("cardinality", ""),
             "is_active": rel.get("is_active", True),
+            "cross_filter_behavior": rel.get("cross_filter_behavior", ""),
         })
 
     for flagged in parsed.get("flagged", []):
         inv["flagged"].append(flagged)
+    for role in parsed.get("roles", []):
+        for permission in role.get("tablePermissions", []):
+            if permission.get("filterExpression"):
+                inv["security_rules"].append({"principal": role.get("name", ""),
+                    "entities": [permission.get("name", "").upper()],
+                    "expression": permission["filterExpression"], "original": permission})
 
 
 def _from_denodo(parsed: dict, inv: dict) -> None:
     """Normalize Denodo parsed data into unified inventory."""
+    import sqlglot
+    from sqlglot import exp
     for view in parsed.get("views", []):
         vname = view.get("name", "UNKNOWN").upper()
-        inv["tables"].append({
-            "name": vname,
-            "physical_table": view.get("name", ""),
-            "view_type": view.get("type", "DERIVED"),
-        })
-
-        for col in view.get("select_columns", []):
-            col_name = col.get("alias", col.get("expression", ""))
-            classification = col.get("classification", "dimension")
-            item = _normalize_item(
-                name=col_name,
-                expr=col.get("expression", f"{vname}.{col_name}"),
-                table=vname,
-                complexity=col.get("complexity", "simple"),
-                original=col,
-                source_view=view.get("name", ""),
-            )
-            if classification == "metric":
-                inv["facts"].append(item)
-            else:
-                inv["dimensions"].append(item)
-
-        for join in view.get("joins", []):
-            inv["relationships"].append({
-                "left_table": join.get("left", "").upper(),
-                "right_table": join.get("right", "").upper(),
-                "join_type": join.get("type", "inner"),
-                "condition": join.get("condition", ""),
-            })
-
-        for agg in view.get("aggregations", []):
-            inv["metrics"].append(_normalize_item(
-                name=agg.get("alias", f"{agg.get('function', '')}_{agg.get('column', '')}"),
-                expr=f"{agg.get('function', 'SUM')}({vname}.{agg.get('column', '')})",
-                data_type="NUMBER",
-                table=vname,
-                original=agg,
-                source_view=view.get("name", ""),
-            ))
+        inv["errors"].extend(view.get("errors", []))
+        # Lower only a single-table SELECT. Full SQL remains provenance; joins,
+        # distinct, unions, limits and HAVING cannot disappear in normalization.
+        try:
+            trees = sqlglot.parse(view.get("full_sql", ""), read="snowflake")
+            if len(trees) != 1 or trees[0] is None:
+                raise ValueError("Denodo view contains additional statements requiring review")
+            tree = trees[0]
+            if isinstance(tree, exp.Create): tree = tree.expression
+            sources = list(tree.find_all(exp.Table))
+            if not isinstance(tree, exp.Select) or len(sources) != 1 or any(tree.args.get(key) for key in
+                    ("joins", "distinct", "having", "limit", "offset", "qualify", "with", "with_")):
+                raise ValueError("Denodo query requires reviewed relational translation")
+            physical = sources[0].copy()
+            physical.set("alias", None)
+            inv["tables"].append({"name": vname, "physical_table": physical.sql(dialect="snowflake")})
+            for selected in tree.expressions:
+                body = selected.this if isinstance(selected, exp.Alias) else selected
+                if isinstance(body, exp.Star):
+                    raise ValueError("Denodo wildcard needs explicit exported columns")
+                body = body.copy()
+                for column in body.find_all(exp.Column):
+                    if column.table and column.table not in (sources[0].name, sources[0].alias):
+                        raise ValueError("Unresolved Denodo column scope")
+                    column.set("table", None)
+                name = selected.alias_or_name
+                if not name: raise ValueError("Denodo expression needs an explicit alias")
+                metric = bool(list(body.find_all(exp.AggFunc)))
+                item = _normalize_item(name=name, expr=body.sql(dialect="snowflake"), table=vname, original=view)
+                inv["metrics" if metric else "dimensions"].append(item)
+                if metric:
+                    for column in body.find_all(exp.Column):
+                        if not any(item["table"] == vname and item["expr"] == column.sql(dialect="snowflake")
+                                   for item in inv["facts"] + inv["dimensions"]):
+                            inv["facts"].append(_normalize_item(name=column.name, expr=column.sql(dialect="snowflake"), table=vname))
+            if tree.args.get("where"):
+                predicate = tree.args["where"].this.copy()
+                for column in predicate.find_all(exp.Column): column.set("table", None)
+                inv["filters"].append({"table": vname, "expr": predicate.sql(dialect="snowflake")})
+            if tree.args.get("group"):
+                projected = {item["expr"] for item in inv["dimensions"] if item["table"] == vname}
+                grouped = set()
+                for expression in tree.args["group"].expressions:
+                    expression = expression.copy()
+                    for column in expression.find_all(exp.Column): column.set("table", None)
+                    grouped.add(expression.sql(dialect="snowflake"))
+                if projected != grouped:
+                    raise ValueError("Denodo group grain differs from projected dimensions")
+        except (ValueError, sqlglot.errors.ParseError) as exc:
+            inv["flagged"].append({"source": vname, "reason": str(exc), "original": view})
 
 
 def _from_businessobjects(parsed: dict, inv: dict) -> None:
@@ -581,29 +619,54 @@ def _from_businessobjects(parsed: dict, inv: dict) -> None:
     for table in parsed.get("tables", []):
         inv["tables"].append({
             "name": table.get("name", "").upper(),
-            "physical_table": table.get("name", ""),
-            "schema": table.get("schema", ""),
+            "physical_table": table.get("sql_name") or table.get("name", ""),
+            "schema": table.get("owner", ""),
+            "database": parsed.get("connection", {}).get("database", ""),
         })
 
     # Joins
     for join in parsed.get("joins", []):
         inv["relationships"].append({
-            "left_table": join.get("leftTable", "").upper(),
-            "right_table": join.get("rightTable", "").upper(),
-            "join_type": join.get("type", "inner"),
+            "left_table": join.get("table1", "").upper(),
+            "left_column": join.get("column1", ""),
+            "right_table": join.get("table2", "").upper(),
+            "right_column": join.get("column2", ""),
+            "join_type": "unresolved_outer" if join.get("outer_join") else "inner",
             "condition": join.get("expression", ""),
             "cardinality": join.get("cardinality", ""),
         })
 
     # Business objects
+    import sqlglot
+    from sqlglot import exp
     for obj in parsed.get("objects", []):
         qual = obj.get("qualification", "dimension").lower()
         complexity = obj.get("complexity", "simple")
+        text = obj.get("resolved_sql") or obj.get("select_expression", "")
+        table_name = obj.get("table", "").upper()
+        try:
+            parsed_expression = sqlglot.parse_one(text, read="snowflake")
+            qualifiers = {column.table.upper() for column in parsed_expression.find_all(exp.Column) if column.table}
+            if not table_name and len(qualifiers) == 1: table_name = qualifiers.pop()
+            for column in parsed_expression.find_all(exp.Column):
+                if column.table and column.table.upper() != table_name:
+                    raise ValueError("Cross-table BusinessObjects expression needs translation")
+                column.set("table", None)
+            text = parsed_expression.sql(dialect="snowflake")
+            if qual == "measure":
+                for column in parsed_expression.find_all(exp.Column):
+                    if not any(item["table"] == table_name and item["name"] == column.name.upper()
+                               for item in inv["facts"] + inv["dimensions"]):
+                        inv["facts"].append(_normalize_item(name=column.name, expr=column.sql(dialect="snowflake"), table=table_name))
+        except (ValueError, sqlglot.errors.ParseError) as exc:
+            inv["flagged"].append({"source": obj.get("name"), "reason": str(exc)})
+        if obj.get("where_expression"):
+            inv["flagged"].append({"source": obj.get("name"), "reason": "Object-level WHERE scope requires translation", "original": obj})
         item = _normalize_item(
             name=obj.get("name", ""),
-            expr=obj.get("resolved_sql", obj.get("select_expression", "")),
+            expr=text,
             data_type=_map_bo_type(obj.get("data_type", "string")),
-            table=obj.get("table", ""),
+            table=table_name,
             description=obj.get("description", ""),
             complexity=complexity,
             original=obj,
@@ -682,11 +745,8 @@ def _from_cognos(parsed: dict, inv: dict) -> None:
         merged["wraps_entities"] = list(
             dict.fromkeys((keep.get("wraps_entities") or []) + (other.get("wraps_entities") or []))
         )
-        # Union the query items as well. The Model View layer adds items that the
-        # Import View does not have -- in the reference model DIM_TIME gains a
-        # calculated "Date" item there, and that is the column the fact-to-date
-        # relationships actually join on. Keeping only the physical layer's items
-        # silently drops the join key and leaves the relationship unresolvable.
+        # Union query items: model layers may add calculated join keys that are
+        # absent from the physical layer. Dropping them breaks source relationships.
         merged_items = list(keep.get("items") or [])
         have = {i.get("name") for i in merged_items}
         for i in other.get("items") or []:
@@ -706,7 +766,7 @@ def _from_cognos(parsed: dict, inv: dict) -> None:
             {
                 "name": name,
                 "physical_name": physical,
-                "database": sf_db,
+                "database": "",  # Source binding must not inherit the generated target.
                 # The Cognos data source alias carries the schema in this model
                 # family; the loader maps alias -> schema explicitly rather than
                 # guessing, so it is passed through verbatim.
@@ -871,12 +931,8 @@ def _from_cognos(parsed: dict, inv: dict) -> None:
             }
         )
 
-    # Filters attached to a query subject are part of that entity's definition,
-    # not decoration. The reference model's Model View layer restricts DIM_TIME to
-    # FINC_YR_ID >= 2018 and DAY_DT < current_date, and FACT_SALES_SUMMARY to
-    # PROCESSED_DATE <= CURRENT_DATE. A conversion that drops them returns rows
-    # the source model excludes, so totals will not reconcile against Cognos and
-    # the difference will look like a data problem rather than a missing filter.
+    # Entity filters affect the row set and must survive layer normalization.
+    # Dropping them changes totals even when the underlying tables are unchanged.
     # Iterate the merged entities, not the raw query subjects: the same filter is
     # declared on both the Import View and Model View copy of an entity, and
     # emitting it twice would double-count the remediation work.

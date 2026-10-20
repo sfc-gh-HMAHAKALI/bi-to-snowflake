@@ -8,8 +8,7 @@ off the same two things -- the fiscal-year suffix convention and the
 query-subject/query-item graph -- so splitting them across separate modules
 would mean three copies of the clone-detection logic drifting apart.
 
-Two of these functions exist to answer specific, previously-unaudited questions
-about the reference model:
+Two analyses report scope-specific hazards:
 
 * ``audit_grain_coverage`` -- which determinants apply to the tables a given
   conversion actually put in scope. A SUM-based metric over a table with an
@@ -31,7 +30,7 @@ from .parser import canonical_calculation_name
 
 log = get_logger(__name__)
 
-# Fiscal-year clone suffix on a table or namespace name: FACT_SALES_SUMMARY_FY22
+# Fiscal-year clone suffix on a table or namespace name: OBSERVATIONS_FY22
 _FY_OBJECT_RE = re.compile(r"^(?P<base>.+?)[_\s]*FY\s?(?P<year>\d{2,4})$", re.IGNORECASE)
 
 # Cognos "Copy of ..." prefix, applied when an object is duplicated in the UI.
@@ -41,7 +40,7 @@ _COPY_PREFIX_RE = re.compile(r"^(?:Copy of\s+)+", re.IGNORECASE)
 def canonical_object_name(name: str) -> tuple[str, str | None]:
     """Strip a fiscal-year suffix from an object name.
 
-    ``FACT_SALES_SUMMARY_FY22`` -> ``("FACT_SALES_SUMMARY", "FY22")``
+    ``OBSERVATIONS_FY22`` -> ``("OBSERVATIONS", "FY22")``
     """
     m = _FY_OBJECT_RE.match((name or "").strip())
     if not m:
@@ -91,7 +90,7 @@ def audit_grain_coverage(
     """Report which grain declarations apply to a named set of entities.
 
     ``in_scope_entities`` is matched on the canonical (fiscal-year-stripped)
-    name, so passing ``FACT_SALES_SUMMARY`` also covers its ``_FY22`` clones.
+    name, so passing ``OBSERVATIONS`` also covers its ``_FY22`` clones.
 
     The ``risk`` field is the actionable part: an in-scope entity that declares a
     row grain of more than one column, or declares a groupable coarser level, is
@@ -479,9 +478,8 @@ def audit_data_sources(parsed: dict) -> dict[str, Any]:
     """Classify each declared data source and count what depends on it.
 
     Answers "how much of this model is actually on Snowflake already" without
-    inferring from table-name prefixes -- several query subjects in the reference model
-    model are named ``EDW_ORA_*`` but read from a Snowflake connection, so
-    name-based inference gives the wrong answer.
+    inferring platform from table-name prefixes. Legacy object names can survive
+    a platform migration and are not evidence of the current source system.
     """
     usage: dict[str, int] = defaultdict(int)
     for qs in parsed.get("query_subjects", []):
